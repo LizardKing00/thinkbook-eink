@@ -1,0 +1,26 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Downloaded package files
+*.deb
+*.rpm
+*.tar.gz
+*.tar.xz
+*.zip
+*.AppImage
+
+# Temporary image files
+/tmp/
+*.tmp
+
+# OS-generated
+.DS_Store
+Thumbs.db
+
+# Editor artifacts
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

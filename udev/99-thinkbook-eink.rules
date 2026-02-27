@@ -1,0 +1,11 @@
+# Lenovo ThinkBook Plus Gen 1 E-ink lid display (ITE IT8951 controller)
+# This rule grants access to all users in the 'plugdev' group without requiring sudo.
+#
+# Install: sudo cp 99-thinkbook-eink.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Then add your user to plugdev if not already:
+#          sudo usermod -aG plugdev $USER
+#          (log out and back in for the group change to take effect)
+
+SUBSYSTEM=="usb", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="8951", MODE="0666", GROUP="plugdev"

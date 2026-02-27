@@ -1,0 +1,32 @@
+[package]
+name = "thinkbook-eink"
+version = "0.1.0"
+edition = "2021"
+authors = ["LizardKing00"]
+description = "Linux driver and CLI tools for the Lenovo ThinkBook Plus Gen 1 E-ink lid display"
+license = "MIT"
+repository = "https://github.com/LizardKing00/thinkbook-eink"
+keywords = ["eink", "lenovo", "thinkbook", "it8951", "display"]
+readme = "README.md"
+
+[[bin]]
+name = "setbackside"
+path = "src/bin/setbackside.rs"
+
+[[bin]]
+name = "eink-clock"
+path = "src/bin/eink-clock.rs"
+
+[[bin]]
+name = "eink-info"
+path = "src/bin/eink-info.rs"
+
+[dependencies]
+anyhow = "1"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+rusb = "0.9"
+image = "0.24"
+chrono = "0.4"
+imageproc = "0.23"
+rusttype = "0.9"
