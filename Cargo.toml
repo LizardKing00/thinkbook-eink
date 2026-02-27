@@ -23,10 +23,8 @@ path = "src/bin/eink-info.rs"
 
 [dependencies]
 anyhow = "1"
-bincode = "1"
-serde = { version = "1", features = ["derive"] }
-rusb = "0.9"
 image = "0.24"
 chrono = "0.4"
 imageproc = "0.23"
 rusttype = "0.9"
+rust-it8951 = { path = "../rust-it8951" }
