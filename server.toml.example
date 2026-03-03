@@ -1,0 +1,10 @@
+# thinkbook-eink server dashboard config
+# Place this file at /etc/thinkbook-eink/server.toml
+
+# Nextcloud URL (no trailing slash)
+nextcloud_url = "https://localhost"
+
+# Nextcloud admin credentials for active user count
+# Leave empty to skip active user querying (online/offline still works)
+nextcloud_user = "admin"
+nextcloud_password = "your-password-here"

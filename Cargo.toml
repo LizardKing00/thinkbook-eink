@@ -21,10 +21,19 @@ path = "src/bin/eink-clock.rs"
 name = "eink-info"
 path = "src/bin/eink-info.rs"
 
+[[bin]]
+name = "eink-server"
+path = "src/bin/eink-server.rs"
+
 [dependencies]
 anyhow = "1"
 image = "0.24"
 chrono = "0.4"
 imageproc = "0.23"
 rusttype = "0.9"
+sysinfo = "0.30"
+reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
 rust-it8951 = { path = "../rust-it8951" }
