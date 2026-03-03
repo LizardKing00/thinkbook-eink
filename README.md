@@ -76,6 +76,28 @@ eink-clock
 
 Displays a large HH:MM clock with the current date, updating every minute. Press Ctrl+C to stop (the last rendered clock face remains on screen — E-ink is non-volatile).
 
+### Server dashboard (system stats)
+
+```bash
+eink-server
+```
+
+Shows a full-screen “server dashboard” with:
+
+- **Header**: hostname label, current time and date
+- **Status bar**: Nextcloud online/offline state, active users (optional), system uptime
+- **Stats row**: RAM usage, root disk usage, CPU load, CPU temperature
+- **Graphs**: upload/download network history
+
+The dashboard **updates once per minute**.
+
+To minimise E‑ink ghosting while keeping updates reliable:
+
+- On each refresh `eink-server` first draws a **white frame in GC16 mode** to scrub previous content.
+- It then renders the new dashboard frame in **DU mode**, which matches the behaviour of `eink-clock` for fast, low-flicker updates.
+
+This means you may see a brief white flash once per minute, but the resulting image is much clearer and does not accumulate previous images (for example, after using `setbackside` to show a photo).
+
 ### Display info
 
 ```bash
@@ -105,7 +127,8 @@ The driver exposes the following IT8951 refresh modes:
 | `A2` | 2-bit | Very fast | Animations |
 | `Init` | Blank flash | — | Clearing between images |
 
-`setbackside` uses `GC16` (best quality). `eink-clock` uses `DU` (fast, minimal flicker).
+`setbackside` uses `GC16` (best quality). `eink-clock` uses `DU` (fast, minimal flicker).  
+`eink-server` combines both: a GC16 white wipe to clear ghosts, followed by DU for the actual dashboard frame.
 
 ---
 

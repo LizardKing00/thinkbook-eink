@@ -338,9 +338,14 @@ fn main() -> Result<()> {
     let config = load_config();
     eprintln!("Connecting to E-ink display...");
     let mut it8951 = It8951::connect()?;
-    let sys_info = it8951.get_system_info().ok_or(anyhow::anyhow!("Failed to get system info"))?;
+    let sys_info = it8951
+        .get_system_info()
+        .ok_or(anyhow::anyhow!("Failed to get system info"))?;
     let (dw, dh) = (sys_info.width, sys_info.height);
-    eprintln!("Connected: {}x{}. Starting server dashboard (Ctrl+C to stop).", dw, dh);
+    eprintln!(
+        "Connected: {}x{}. Starting server dashboard (Ctrl+C to stop).",
+        dw, dh
+    );
 
     let font_bold = load_font(true);
     let font_reg = load_font(false);
@@ -355,25 +360,51 @@ fn main() -> Result<()> {
         sys.refresh_all();
         let elapsed = last_tick.elapsed().as_secs_f64().max(1.0);
         last_tick = std::time::Instant::now();
-        let (rx_speed, tx_speed, total_rx, total_tx) = get_network_speeds(&sys, prev_rx, prev_tx, elapsed);
+        let (rx_speed, tx_speed, total_rx, total_tx) =
+            get_network_speeds(&sys, prev_rx, prev_tx, elapsed);
         prev_rx = total_rx;
         prev_tx = total_tx;
-        if upload_history.len() == 60 { upload_history.pop_front(); }
-        if download_history.len() == 60 { download_history.pop_front(); }
+        if upload_history.len() == 60 {
+            upload_history.pop_front();
+        }
+        if download_history.len() == 60 {
+            download_history.pop_front();
+        }
         upload_history.push_back(tx_speed);
         download_history.push_back(rx_speed);
         let cpu_temp = get_cpu_temp();
         let (nc_online, nc_users) = check_nextcloud(&config);
-        let img = render(&font_bold, &font_reg, &sys, &upload_history, &download_history, nc_online, nc_users, cpu_temp);
+        let img = render(
+            &font_bold,
+            &font_reg,
+            &sys,
+            &upload_history,
+            &download_history,
+            nc_online,
+            nc_users,
+            cpu_temp,
+        );
         let prepared = DynamicImage::ImageLuma8(img);
-        it8951.load_region(&prepared, 0, 0)?;
+
+        // First flash to a pure white frame in GC16 to scrub old content,
+        // then draw the new frame (DU for faster update / less wear).
+        let clear_img = GrayImage::from_pixel(dw, dh, Luma([255u8]));
+        let clear_dyn = DynamicImage::ImageLuma8(clear_img);
+        it8951.load_region(&clear_dyn, 0, 0)?;
         it8951.display_region(0, 0, dw, dh, Mode::GC16)?;
-        eprintln!("[{}] RAM:{:.0}% CPU:{:.0}% TEMP:{:.0}C TX:{} RX:{} NC:{}",
+
+        it8951.load_region(&prepared, 0, 0)?;
+        it8951.display_region(0, 0, dw, dh, Mode::DU)?;
+        eprintln!(
+            "[{}] RAM:{:.0}% CPU:{:.0}% TEMP:{:.0}C TX:{} RX:{} NC:{}",
             Local::now().format("%H:%M:%S"),
             sys.used_memory() as f32 / sys.total_memory() as f32 * 100.0,
-            sys.global_cpu_info().cpu_usage(), cpu_temp,
-            format_speed(tx_speed), format_speed(rx_speed),
-            if nc_online { "ONLINE" } else { "OFFLINE" });
+            sys.global_cpu_info().cpu_usage(),
+            cpu_temp,
+            format_speed(tx_speed),
+            format_speed(rx_speed),
+            if nc_online { "ONLINE" } else { "OFFLINE" }
+        );
         thread::sleep(Duration::from_secs(60));
     }
 }
