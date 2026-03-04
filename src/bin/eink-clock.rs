@@ -32,7 +32,8 @@ fn render_clock(font: &Font) -> DynamicImage {
     let time_str = now.format("%H:%M").to_string();
     let date_str = now.format("%A, %d %B %Y").to_string();
 
-    let mut img = GrayImage::from_pixel(WIDTH, HEIGHT, Luma([255u8]));
+    // Darker background for better contrast on the lid.
+    let mut img = GrayImage::from_pixel(WIDTH, HEIGHT, Luma([230u8]));
 
     let time_scale = Scale::uniform(300.0);
     let (tw, _) = text_size(time_scale, font, &time_str);

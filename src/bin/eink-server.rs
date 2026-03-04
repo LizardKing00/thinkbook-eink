@@ -16,10 +16,11 @@ use rust_it8951::{It8951, Mode};
 const W: u32 = 1920;
 const H: u32 = 1080;
 
-const BG:       Luma<u8> = Luma([18u8]);
-const BRIGHT:   Luma<u8> = Luma([240u8]);
-const MID:      Luma<u8> = Luma([160u8]);
-const DIM:      Luma<u8> = Luma([80u8]);
+// Slightly darker, higher-contrast palette for better readability.
+const BG:       Luma<u8> = Luma([10u8]);   // background
+const BRIGHT:   Luma<u8> = Luma([245u8]);  // primary text / outlines
+const MID:      Luma<u8> = Luma([170u8]);  // secondary text / boxes
+const DIM:      Luma<u8> = Luma([90u8]);   // accents / grid lines
 
 const MARGIN: i32 = 40;
 const CONFIG_PATH: &str = "/etc/thinkbook-eink/server.toml";
@@ -143,7 +144,9 @@ fn scanlines(img: &mut GrayImage) {
     let mut y = 0u32;
     while y < H {
         for x in 0..W {
-            let v = img.get_pixel(x, y)[0].saturating_sub(6);
+            // Darken every second line a bit more to increase
+            // perceived contrast without losing too much detail.
+            let v = img.get_pixel(x, y)[0].saturating_sub(10);
             img.put_pixel(x, y, Luma([v]));
         }
         y += 2;
