@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use anyhow::Result;
-use chrono::Local;
+use chrono::{Local, Timelike};
 use image::{DynamicImage, GrayImage, Luma};
 use imageproc::drawing::{draw_filled_rect_mut, draw_line_segment_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect;
@@ -108,17 +108,6 @@ fn dashed_hline(img: &mut GrayImage, x1: i32, x2: i32, y: i32, color: Luma<u8>) 
     }
 }
 
-fn seg_bar(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, fraction: f32) {
-    let segments = 20;
-    let seg_w = (w - segments) / segments;
-    let filled = (fraction.clamp(0.0, 1.0) * segments as f32) as i32;
-    for i in 0..segments {
-        let sx = x + i * (seg_w + 1);
-        let color = if i < filled { BRIGHT } else { DIM };
-        draw_filled_rect_mut(img, Rect::at(sx, y).of_size(seg_w as u32, h as u32), color);
-    }
-}
-
 fn draw_graph(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, values: &VecDeque<f64>) {
     if values.len() < 2 { return; }
     let max_val = values.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
@@ -182,42 +171,40 @@ fn format_uptime(secs: u64) -> String {
     else { format!("{}M", mins) }
 }
 
-fn check_nextcloud(config: &Config) -> (bool, u32, String) {
+fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
     let base = config
         .nextcloud_url
         .clone()
         .unwrap_or_else(|| "https://localhost".to_string());
-    let user = config.nextcloud_user.clone().unwrap_or_default();
-    let pass = config.nextcloud_password.clone().unwrap_or_default();
     let client: reqwest::blocking::Client = match reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
         .build() {
         Ok(c) => c,
-        Err(_) => return (false, 0, base),
+        Err(_) => return (false, String::new(), 0, base),
     };
-    let online = client
+    // Measure latency and extract Nextcloud version from status.php.
+    let start = std::time::Instant::now();
+    let status_resp = client
         .get(format!("{}/status.php", base))
-        .send()
-        .map(|r: reqwest::blocking::Response| r.status().is_success())
-        .unwrap_or(false);
-    if !online || user.is_empty() {
-        return (online, 0, base);
-    }
-    // Use the provisioning API to get the total number of users instead of
-    // relying on admin_audit's "active users" metric, which is often disabled
-    // or unavailable on stock installations (e.g. Nextcloud AIO).
-    let total_users = client
-        .get(format!("{}/ocs/v1.php/cloud/users", base))
-        .basic_auth(&user, Some(&pass))
-        .header("OCS-APIRequest", "true")
-        .query(&[("format", "json"), ("limit", "0")])
-        .send()
-        .ok()
-        .and_then(|r: reqwest::blocking::Response| r.json::<serde_json::Value>().ok())
-        .and_then(|j| j["ocs"]["data"]["users"].as_array().map(|arr| arr.len() as u32))
-        .unwrap_or(0);
-    (online, total_users, base)
+        .send();
+    let elapsed_ms = start.elapsed().as_millis() as u32;
+
+    let (online, version) = match status_resp {
+        Ok(resp) if resp.status().is_success() => {
+            let ver = resp
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|j| j["versionstring"].as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            (true, ver)
+        }
+        _ => (false, String::new()),
+    };
+
+    // If offline, we still return the measured latency for debugging,
+    // but the UI will primarily key off the online flag.
+    (online, version, elapsed_ms, base)
 }
 
 fn render(
@@ -227,7 +214,8 @@ fn render(
     upload_history: &VecDeque<f64>,
     download_history: &VecDeque<f64>,
     nc_online: bool,
-    nc_users: u32,
+    nc_version: &str,
+    nc_latency_ms: u32,
     cpu_temp: f32,
     nc_url: &str,
 ) -> GrayImage {
@@ -247,9 +235,27 @@ fn render(
     // Status bar
     let status_str = if nc_online { "[ NEXTCLOUD: ONLINE ]" } else { "[ NEXTCLOUD: OFFLINE ]" };
     txt(&mut img, fb, status_str, MARGIN, 124, 34.0, if nc_online { BRIGHT } else { DIM });
-    txt(&mut img, fr, &format!("TOTAL USERS: {}", nc_users), 640, 130, 30.0, MID);
-    txt(&mut img, fr, &format!("UPTIME: {}", format_uptime(System::uptime())), 1060, 130, 30.0, MID);
-    txt_r(&mut img, fr, &format!("UPDATED: {}", now.format("%H:%M")), W as i32 - MARGIN, 130, 30.0, DIM);
+    let ver_label = if nc_online && !nc_version.is_empty() {
+        format!("NC VER: {}", nc_version)
+    } else {
+        "NC VER: -".to_string()
+    };
+    let lat_label = if nc_online {
+        format!("LATENCY: {}MS", nc_latency_ms)
+    } else {
+        "LATENCY: N/A".to_string()
+    };
+    txt(&mut img, fr, &ver_label, 640, 130, 30.0, MID);
+    txt(&mut img, fr, &lat_label, 1060, 130, 30.0, MID);
+    txt_r(
+        &mut img,
+        fr,
+        &format!("UPTIME: {}", format_uptime(System::uptime())),
+        W as i32 - MARGIN,
+        130,
+        30.0,
+        MID,
+    );
     hline(&mut img, MARGIN, W as i32 - MARGIN, 172, DIM);
 
     // Row 1: stat boxes
@@ -261,14 +267,21 @@ fn render(
     // RAM
     let ram_used = sys.used_memory();
     let ram_total = sys.total_memory();
-    let ram_frac = ram_used as f32 / ram_total as f32;
     let bx = MARGIN;
     corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
     txt(&mut img, fr, "// RAM", bx + arm + 6, r1y + 8, 24.0, DIM);
     txt_c(&mut img, fb, &format_bytes(ram_used), bx + col_w / 2, r1y + 40, 62.0, BRIGHT);
     txt_c(&mut img, fr, &format!("/ {}", format_bytes(ram_total)), bx + col_w / 2, r1y + 114, 28.0, MID);
-    seg_bar(&mut img, bx + 16, r1y + 156, col_w - 32, 14, ram_frac);
-    txt_c(&mut img, fr, &format!("{:.0}% USED", ram_frac * 100.0), bx + col_w / 2, r1y + 176, 22.0, DIM);
+    let ram_frac = ram_used as f32 / ram_total as f32;
+    txt_c(
+        &mut img,
+        fr,
+        &format!("{:.0}% USED", ram_frac * 100.0),
+        bx + col_w / 2,
+        r1y + 176,
+        22.0,
+        DIM,
+    );
 
     // DISK
     let disks = Disks::new_with_refreshed_list();
@@ -276,22 +289,28 @@ fn render(
         .find(|d| d.mount_point().to_str() == Some("/"))
         .map(|d| (d.total_space() - d.available_space(), d.total_space()))
         .unwrap_or((0, 1));
-    let disk_frac = disk_used as f32 / disk_total as f32;
     let bx = MARGIN + col_w + 20;
     corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
     txt(&mut img, fr, "// DISK", bx + arm + 6, r1y + 8, 24.0, DIM);
     txt_c(&mut img, fb, &format_bytes(disk_used), bx + col_w / 2, r1y + 40, 62.0, BRIGHT);
     txt_c(&mut img, fr, &format!("/ {}", format_bytes(disk_total)), bx + col_w / 2, r1y + 114, 28.0, MID);
-    seg_bar(&mut img, bx + 16, r1y + 156, col_w - 32, 14, disk_frac);
-    txt_c(&mut img, fr, &format!("{:.0}% USED", disk_frac * 100.0), bx + col_w / 2, r1y + 176, 22.0, DIM);
+    let disk_frac = disk_used as f32 / disk_total as f32;
+    txt_c(
+        &mut img,
+        fr,
+        &format!("{:.0}% USED", disk_frac * 100.0),
+        bx + col_w / 2,
+        r1y + 176,
+        22.0,
+        DIM,
+    );
 
     // CPU
-    let cpu_usage = sys.global_cpu_info().cpu_usage();
     let bx = MARGIN + 2 * (col_w + 20);
     corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
     txt(&mut img, fr, "// CPU", bx + arm + 6, r1y + 8, 24.0, DIM);
+    let cpu_usage = sys.global_cpu_info().cpu_usage();
     txt_c(&mut img, fb, &format!("{:.0}%", cpu_usage), bx + col_w / 2, r1y + 40, 80.0, BRIGHT);
-    seg_bar(&mut img, bx + 16, r1y + 156, col_w - 32, 14, cpu_usage / 100.0);
     txt_c(&mut img, fr, "LOAD", bx + col_w / 2, r1y + 176, 22.0, DIM);
 
     // TEMP
@@ -410,6 +429,7 @@ fn main() -> Result<()> {
     let mut prev_rx: u64 = 0;
     let mut prev_tx: u64 = 0;
     let mut last_tick = std::time::Instant::now();
+    let mut first_tick = true;
 
     loop {
         sys.refresh_all();
@@ -428,7 +448,7 @@ fn main() -> Result<()> {
         upload_history.push_back(tx_speed);
         download_history.push_back(rx_speed);
         let cpu_temp = get_cpu_temp();
-        let (nc_online, nc_users, nc_url) = check_nextcloud(&config);
+        let (nc_online, nc_version, nc_latency_ms, nc_url) = check_nextcloud(&config);
         let img = render(
             &font_bold,
             &font_reg,
@@ -436,7 +456,8 @@ fn main() -> Result<()> {
             &upload_history,
             &download_history,
             nc_online,
-            nc_users,
+            &nc_version,
+            nc_latency_ms,
             cpu_temp,
             &nc_url,
         );
@@ -461,6 +482,17 @@ fn main() -> Result<()> {
             format_speed(rx_speed),
             if nc_online { "ONLINE" } else { "OFFLINE" }
         );
-        thread::sleep(Duration::from_secs(60));
+        // First iteration: align to the next full minute boundary (e.g. 11:30:00)
+        // to synchronise with the on-screen clock. Afterwards, use a fixed 60s
+        // interval for more stable timing.
+        if first_tick {
+            let now = Local::now();
+            let secs_remaining = 60 - now.second();
+            let sleep_secs = if secs_remaining == 0 { 60 } else { secs_remaining as u64 };
+            first_tick = false;
+            thread::sleep(Duration::from_secs(sleep_secs));
+        } else {
+            thread::sleep(Duration::from_secs(60));
+        }
     }
 }
