@@ -76,6 +76,20 @@ eink-clock
 
 Displays a large HH:MM clock with the current date, updating every minute. Press Ctrl+C to stop (the last rendered clock face remains on screen — E-ink is non-volatile).
 
+Rough layout (1920x1080 E-ink):
+
+```
++----------------------------------------------------------+
+|                                                          |
+|                      23:41                               |
+|                                                          |
+|                       2026-03-04                         |
+|                                                          |
+|                                                          |
+|                                                          |
++----------------------------------------------------------+
+```
+
 ### Server dashboard (system stats)
 
 ```bash
@@ -85,7 +99,7 @@ eink-server
 Shows a full-screen “server dashboard” with:
 
 - **Header**: hostname label, current time and date
-- **Status bar**: Nextcloud online/offline state, active users (optional), system uptime
+- **Status bar**: Nextcloud online/offline state, total users (optional), system uptime
 - **Stats row**: RAM usage, root disk usage, CPU load, CPU temperature
 - **Graphs**: upload/download network history
 
@@ -97,6 +111,30 @@ To minimise E‑ink ghosting while keeping updates reliable:
 - It then renders the new dashboard frame in **DU mode**, which matches the behaviour of `eink-clock` for fast, low-flicker updates.
 
 This means you may see a brief white flash once per minute, but the resulting image is much clearer and does not accumulate previous images (for example, after using `setbackside` to show a photo).
+
+Rough layout (simplified ASCII preview):
+
+```
++--------------------------------------------------------------------------------------+
+| SYS://NEXTCLOUD-NODE                                  10:32              04.03.2026 |
+|--------------------------------------------------------------------------------------|
+| [ NEXTCLOUD: ONLINE ]    TOTAL USERS: 3      UPTIME: 2D 04H 13M   UPDATED: 10:32    |
+|--------------------------------------------------------------------------------------|
+|  // RAM        |  // DISK       |  // CPU        |  // TEMP                          |
+|  [######    ]  |  [#####     ]  |      23%       |        55°C                       |
+|                |                |   LOAD BAR     |        CPU TEMP                   |
+|--------------------------------------------------------------------------------------|
+| // UPLOAD                         // DOWNLOAD                                       |
+|  TX: 1.2 MB/S                     RX: 3.4 MB/S                                      |
+|  [ upload graph over time ]       [ download graph over time ]                      |
+|        SPEED                                SPEED                                   |
+|        TIME →                              TIME →                                   |
+|  TX MB/S (LAST 60 MIN)            RX MB/S (LAST 60 MIN)                             |
+|                                                                                      |
+|  NEXTCLOUD URL: nextcloud.example.com                                               |
+|  CFG: /etc/thinkbook-eink/server.toml                                               |
++--------------------------------------------------------------------------------------+
+```
 
 ### Display info
 
