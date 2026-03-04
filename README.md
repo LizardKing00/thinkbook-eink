@@ -81,7 +81,7 @@ Rough layout (1920x1080 E-ink):
 ```
 +----------------------------------------------------------+
 |                                                          |
-|                      23:41                               |
+|                         23:41                            |
 |                                                          |
 |                       2026-03-04                         |
 |                                                          |
@@ -116,23 +116,23 @@ Rough layout (simplified ASCII preview):
 
 ```
 +--------------------------------------------------------------------------------------+
-| SYS://NEXTCLOUD-NODE                                  10:32              04.03.2026 |
+| SYS://NEXTCLOUD-NODE                                  10:32              04.03.2026  |
 |--------------------------------------------------------------------------------------|
-| [ NEXTCLOUD: ONLINE ]    TOTAL USERS: 3      UPTIME: 2D 04H 13M   UPDATED: 10:32    |
+| [ NEXTCLOUD: ONLINE ]    TOTAL USERS: 3      UPTIME: 2D 04H 13M   UPDATED: 10:32     |
 |--------------------------------------------------------------------------------------|
 |  // RAM        |  // DISK       |  // CPU        |  // TEMP                          |
 |  [######    ]  |  [#####     ]  |      23%       |        55°C                       |
 |                |                |   LOAD BAR     |        CPU TEMP                   |
 |--------------------------------------------------------------------------------------|
-| // UPLOAD                         // DOWNLOAD                                       |
-|  TX: 1.2 MB/S                     RX: 3.4 MB/S                                      |
-|  [ upload graph over time ]       [ download graph over time ]                      |
-|        SPEED                                SPEED                                   |
-|        TIME →                              TIME →                                   |
-|  TX MB/S (LAST 60 MIN)            RX MB/S (LAST 60 MIN)                             |
+| // UPLOAD                         // DOWNLOAD                                        |
+|  TX: 1.2 MB/S                     RX: 3.4 MB/S                                       |
+|  [ upload graph over time ]       [ download graph over time ]                       |
+|        SPEED                                SPEED                                    |
+|        TIME →                              TIME →                                    |
+|  TX MB/S (LAST 60 MIN)            RX MB/S (LAST 60 MIN)                              |
 |                                                                                      |
-|  NEXTCLOUD URL: nextcloud.example.com                                               |
-|  CFG: /etc/thinkbook-eink/server.toml                                               |
+|  NEXTCLOUD URL: nextcloud.example.com                                                |
+|  CFG: /etc/thinkbook-eink/server.toml                                                |
 +--------------------------------------------------------------------------------------+
 ```
 
