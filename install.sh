@@ -9,6 +9,7 @@ echo "Installing binaries to /usr/local/bin/..."
 sudo cp target/release/setbackside /usr/local/bin/setbackside
 sudo cp target/release/eink-clock /usr/local/bin/eink-clock
 sudo cp target/release/eink-info /usr/local/bin/eink-info
+sudo cp target/release/eink-server /usr/local/bin/eink-server
 
 echo "Installing udev rule..."
 sudo cp udev/99-thinkbook-eink.rules /etc/udev/rules.d/
@@ -28,3 +29,4 @@ echo "Usage:"
 echo "  setbackside ~/path/to/image.jpg"
 echo "  eink-clock"
 echo "  eink-info"
+echo "  eink-server"

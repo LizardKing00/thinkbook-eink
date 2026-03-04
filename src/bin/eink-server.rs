@@ -179,8 +179,11 @@ fn format_uptime(secs: u64) -> String {
     else { format!("{}M", mins) }
 }
 
-fn check_nextcloud(config: &Config) -> (bool, u32) {
-    let base = config.nextcloud_url.clone().unwrap_or_else(|| "https://localhost".to_string());
+fn check_nextcloud(config: &Config) -> (bool, u32, String) {
+    let base = config
+        .nextcloud_url
+        .clone()
+        .unwrap_or_else(|| "https://localhost".to_string());
     let user = config.nextcloud_user.clone().unwrap_or_default();
     let pass = config.nextcloud_password.clone().unwrap_or_default();
     let client: reqwest::blocking::Client = match reqwest::blocking::Client::builder()
@@ -188,27 +191,43 @@ fn check_nextcloud(config: &Config) -> (bool, u32) {
         .timeout(Duration::from_secs(5))
         .build() {
         Ok(c) => c,
-        Err(_) => return (false, 0),
+        Err(_) => return (false, 0, base),
     };
-    let online = client.get(format!("{}/status.php", base))
+    let online = client
+        .get(format!("{}/status.php", base))
         .send()
         .map(|r: reqwest::blocking::Response| r.status().is_success())
         .unwrap_or(false);
-    if !online || user.is_empty() { return (online, 0); }
-    let active_users = client
-        .get(format!("{}/ocs/v2.php/apps/admin_audit/api/v1/activities", base))
+    if !online || user.is_empty() {
+        return (online, 0, base);
+    }
+    // Use the provisioning API to get the total number of users instead of
+    // relying on admin_audit's "active users" metric, which is often disabled
+    // or unavailable on stock installations (e.g. Nextcloud AIO).
+    let total_users = client
+        .get(format!("{}/ocs/v1.php/cloud/users", base))
         .basic_auth(&user, Some(&pass))
         .header("OCS-APIRequest", "true")
+        .query(&[("format", "json"), ("limit", "0")])
         .send()
         .ok()
         .and_then(|r: reqwest::blocking::Response| r.json::<serde_json::Value>().ok())
-        .and_then(|j| j["ocs"]["data"]["activeUsers"]["last5minutes"].as_u64().map(|v| v as u32))
+        .and_then(|j| j["ocs"]["data"]["users"].as_array().map(|arr| arr.len() as u32))
         .unwrap_or(0);
-    (online, active_users)
+    (online, total_users, base)
 }
 
-fn render(fb: &Font, fr: &Font, sys: &System, upload_history: &VecDeque<f64>,
-    download_history: &VecDeque<f64>, nc_online: bool, nc_users: u32, cpu_temp: f32) -> GrayImage {
+fn render(
+    fb: &Font,
+    fr: &Font,
+    sys: &System,
+    upload_history: &VecDeque<f64>,
+    download_history: &VecDeque<f64>,
+    nc_online: bool,
+    nc_users: u32,
+    cpu_temp: f32,
+    nc_url: &str,
+) -> GrayImage {
 
     let mut img = GrayImage::from_pixel(W, H, BG);
     scanlines(&mut img);
@@ -225,7 +244,7 @@ fn render(fb: &Font, fr: &Font, sys: &System, upload_history: &VecDeque<f64>,
     // Status bar
     let status_str = if nc_online { "[ NEXTCLOUD: ONLINE ]" } else { "[ NEXTCLOUD: OFFLINE ]" };
     txt(&mut img, fb, status_str, MARGIN, 124, 34.0, if nc_online { BRIGHT } else { DIM });
-    txt(&mut img, fr, &format!("ACTIVE USERS: {}", nc_users), 640, 130, 30.0, MID);
+    txt(&mut img, fr, &format!("TOTAL USERS: {}", nc_users), 640, 130, 30.0, MID);
     txt(&mut img, fr, &format!("UPTIME: {}", format_uptime(System::uptime())), 1060, 130, 30.0, MID);
     txt_r(&mut img, fr, &format!("UPDATED: {}", now.format("%H:%M")), W as i32 - MARGIN, 130, 30.0, DIM);
     hline(&mut img, MARGIN, W as i32 - MARGIN, 172, DIM);
@@ -276,8 +295,8 @@ fn render(fb: &Font, fr: &Font, sys: &System, upload_history: &VecDeque<f64>,
     let bx = MARGIN + 3 * (col_w + 20);
     corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
     txt(&mut img, fr, "// TEMP", bx + arm + 6, r1y + 8, 24.0, DIM);
-    txt_c(&mut img, fb, &format!("{:.0}", cpu_temp), bx + col_w / 2, r1y + 40, 80.0, BRIGHT);
-    txt_c(&mut img, fr, "CELSIUS", bx + col_w / 2, r1y + 130, 28.0, MID);
+    txt_c(&mut img, fb, &format!("{:.0}°C", cpu_temp), bx + col_w / 2, r1y + 40, 80.0, BRIGHT);
+    txt_c(&mut img, fr, "CPU TEMP", bx + col_w / 2, r1y + 130, 28.0, MID);
 
     // Divider
     let r2y = r1y + r1h + 28;
@@ -294,6 +313,10 @@ fn render(fb: &Font, fr: &Font, sys: &System, upload_history: &VecDeque<f64>,
     txt_r(&mut img, fb, &format!("TX: {}", format_speed(cur_up)), bx + graph_w, r2y + 2, 28.0, BRIGHT);
     corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, DIM);
     draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, upload_history);
+    // Axis descriptors and units
+    txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, DIM);
+    txt_r(&mut img, fr, "TIME →", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
+    txt_c(&mut img, fr, "TX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, DIM);
 
     let bx = MARGIN + graph_w + 60;
     txt(&mut img, fb, "// DOWNLOAD", bx, r2y, 30.0, MID);
@@ -301,6 +324,35 @@ fn render(fb: &Font, fr: &Font, sys: &System, upload_history: &VecDeque<f64>,
     txt_r(&mut img, fb, &format!("RX: {}", format_speed(cur_down)), bx + graph_w, r2y + 2, 28.0, BRIGHT);
     corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, DIM);
     draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, download_history);
+    txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, DIM);
+    txt_r(&mut img, fr, "TIME →", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
+    txt_c(&mut img, fr, "RX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, DIM);
+
+    // Use the space below the graphs to show Nextcloud connection info.
+    let summary_y = H as i32 - 96;
+    // Show the configured Nextcloud URL (trim scheme for compactness).
+    let display_url = nc_url
+        .strip_prefix("https://")
+        .or_else(|| nc_url.strip_prefix("http://"))
+        .unwrap_or(nc_url);
+    txt(
+        &mut img,
+        fr,
+        &format!("NEXTCLOUD URL: {}", display_url),
+        MARGIN,
+        summary_y,
+        22.0,
+        DIM,
+    );
+    txt(
+        &mut img,
+        fr,
+        "CFG: /etc/thinkbook-eink/server.toml",
+        MARGIN,
+        summary_y + 24,
+        20.0,
+        DIM,
+    );
 
     // Footer
     let fy = H as i32 - 44;
@@ -373,7 +425,7 @@ fn main() -> Result<()> {
         upload_history.push_back(tx_speed);
         download_history.push_back(rx_speed);
         let cpu_temp = get_cpu_temp();
-        let (nc_online, nc_users) = check_nextcloud(&config);
+        let (nc_online, nc_users, nc_url) = check_nextcloud(&config);
         let img = render(
             &font_bold,
             &font_reg,
@@ -383,6 +435,7 @@ fn main() -> Result<()> {
             nc_online,
             nc_users,
             cpu_temp,
+            &nc_url,
         );
         let prepared = DynamicImage::ImageLuma8(img);
 

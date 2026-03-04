@@ -1,0 +1,15 @@
+[Unit]
+Description=ThinkBook E-ink server dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/eink-server
+Restart=always
+RestartSec=10
+User=REPLACE_ME_WITH_YOUR_USERNAME
+Group=plugdev
+
+[Install]
+WantedBy=multi-user.target
