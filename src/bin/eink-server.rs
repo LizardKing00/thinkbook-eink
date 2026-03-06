@@ -337,7 +337,7 @@ fn render(
     draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, upload_history);
     // Axis descriptors and units
     txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, DIM);
-    txt_r(&mut img, fr, "TIME →", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
+    txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
     txt_c(&mut img, fr, "TX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, DIM);
 
     let bx = MARGIN + graph_w + 60;
@@ -347,7 +347,7 @@ fn render(
     corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, DIM);
     draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, download_history);
     txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, DIM);
-    txt_r(&mut img, fr, "TIME →", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
+    txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
     txt_c(&mut img, fr, "RX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, DIM);
 
     // Use the space below the graphs to show Nextcloud connection info.
@@ -386,11 +386,14 @@ fn render(
     img
 }
 
+// CHANGED: skip loopback interface so symmetric lo traffic doesn't make
+// upload and download graphs look identical.
 fn get_network_speeds(_sys: &System, prev_rx: u64, prev_tx: u64, elapsed_secs: f64) -> (f64, f64, u64, u64) {
     let mut total_rx: u64 = 0;
     let mut total_tx: u64 = 0;
     let networks = Networks::new_with_refreshed_list();
-    for (_, data) in &networks {
+    for (name, data) in &networks {
+        if name == "lo" { continue; }
         total_rx += data.total_received();
         total_tx += data.total_transmitted();
     }
