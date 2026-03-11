@@ -1,10 +1,28 @@
-# thinkbook-eink server dashboard config
+# thinkbook-eink configuration
 # Place this file at /etc/thinkbook-eink/server.toml
 
-# Nextcloud URL (no trailing slash)
-nextcloud_url = "https://localhost"
+# ---------------------------------------------------------------------------
+# Display
+# ---------------------------------------------------------------------------
 
-# Nextcloud admin credentials for active user count
-# Leave empty to skip active user querying (online/offline still works)
-nextcloud_user = "admin"
-nextcloud_password = "your-password-here"
+# Rotate the display 180 degrees. Useful if the laptop is mounted upside down
+# or the lid display is physically inverted relative to your setup.
+# Default: false
+#flip = true
+
+# Colour theme. "dark" = dark background with bright text (default).
+#                "light" = light background with dark text.
+# Default: "dark"
+#theme = "light"
+
+# ---------------------------------------------------------------------------
+# Nextcloud (eink-server only)
+# ---------------------------------------------------------------------------
+
+# Nextcloud URL (no trailing slash)
+#nextcloud_url = "https://localhost"
+
+# Nextcloud admin credentials for version/latency checks.
+# Leave empty to skip (online/offline detection still works via status.php).
+#nextcloud_user = "admin"
+#nextcloud_password = "your-password-here"

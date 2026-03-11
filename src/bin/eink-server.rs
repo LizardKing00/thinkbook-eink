@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use anyhow::Result;
 use chrono::{Local, Timelike};
-use image::{DynamicImage, GrayImage, Luma};
+use image::{DynamicImage, GrayImage, Luma, imageops};
 use imageproc::drawing::{draw_filled_rect_mut, draw_line_segment_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect;
 use rusttype::{Font, Scale};
@@ -16,32 +16,81 @@ use rust_it8951::{It8951, Mode};
 const W: u32 = 1920;
 const H: u32 = 1080;
 
-// Slightly darker, higher-contrast palette for better readability.
-const BG:       Luma<u8> = Luma([10u8]);   // background
-const BRIGHT:   Luma<u8> = Luma([245u8]);  // primary text / outlines
-const MID:      Luma<u8> = Luma([170u8]);  // secondary text / boxes
-const DIM:      Luma<u8> = Luma([90u8]);   // accents / grid lines
-
 const MARGIN: i32 = 40;
 const CONFIG_PATH: &str = "/etc/thinkbook-eink/server.toml";
 
-#[derive(Deserialize, Default)]
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
 struct Config {
+    flip: Option<bool>,
+    theme: Option<Theme>,
     nextcloud_url: Option<String>,
     nextcloud_user: Option<String>,
     nextcloud_password: Option<String>,
 }
 
-fn load_config() -> Config {
-    if Path::new(CONFIG_PATH).exists() {
-        if let Ok(contents) = fs::read_to_string(CONFIG_PATH) {
-            if let Ok(config) = toml::from_str(&contents) {
-                return config;
+impl Config {
+    fn load() -> Self {
+        if Path::new(CONFIG_PATH).exists() {
+            if let Ok(contents) = fs::read_to_string(CONFIG_PATH) {
+                if let Ok(config) = toml::from_str(&contents) {
+                    return config;
+                }
+            }
+        }
+        Config::default()
+    }
+
+    fn is_flipped(&self) -> bool {
+        self.flip.unwrap_or(false)
+    }
+
+    fn is_dark(&self) -> bool {
+        matches!(self.theme.as_ref().unwrap_or(&Theme::Dark), Theme::Dark)
+    }
+}
+
+struct Palette {
+    bg:     Luma<u8>,
+    bright: Luma<u8>,
+    mid:    Luma<u8>,
+    dim:    Luma<u8>,
+}
+
+impl Palette {
+    fn from_config(config: &Config) -> Self {
+        if config.is_dark() {
+            Palette {
+                bg:     Luma([10u8]),
+                bright: Luma([245u8]),
+                mid:    Luma([170u8]),
+                dim:    Luma([90u8]),
+            }
+        } else {
+            Palette {
+                bg:     Luma([245u8]),
+                bright: Luma([10u8]),
+                mid:    Luma([80u8]),
+                dim:    Luma([160u8]),
             }
         }
     }
-    Config::default()
 }
+
+// ---------------------------------------------------------------------------
+// Fonts
+// ---------------------------------------------------------------------------
 
 fn load_font(bold: bool) -> Font<'static> {
     let paths: &[&str] = if bold {
@@ -66,6 +115,10 @@ fn load_font(bold: bool) -> Font<'static> {
     }
     panic!("No font found. Install fonts-ubuntu or fonts-dejavu.");
 }
+
+// ---------------------------------------------------------------------------
+// Drawing helpers
+// ---------------------------------------------------------------------------
 
 fn txt(img: &mut GrayImage, font: &Font, text: &str, x: i32, y: i32, size: f32, color: Luma<u8>) {
     draw_text_mut(img, color, x, y, Scale::uniform(size), font, text);
@@ -108,7 +161,7 @@ fn dashed_hline(img: &mut GrayImage, x1: i32, x2: i32, y: i32, color: Luma<u8>) 
     }
 }
 
-fn draw_graph(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, values: &VecDeque<f64>) {
+fn draw_graph(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, values: &VecDeque<f64>, p: &Palette) {
     if values.len() < 2 { return; }
     let max_val = values.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
     let n = values.len();
@@ -123,24 +176,33 @@ fn draw_graph(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, values: &VecD
         let col_top = y0 as i32;
         let col_bot = (y + h) as i32;
         if col_top < col_bot && col_x >= x && col_x < x + w {
-            draw_filled_rect_mut(img, Rect::at(col_x, col_top).of_size(1, (col_bot - col_top) as u32), DIM);
+            draw_filled_rect_mut(img, Rect::at(col_x, col_top).of_size(1, (col_bot - col_top) as u32), p.dim);
         }
-        draw_line_segment_mut(img, points[i - 1], points[i], BRIGHT);
+        draw_line_segment_mut(img, points[i - 1], points[i], p.bright);
     }
 }
 
-fn scanlines(img: &mut GrayImage) {
+fn scanlines(img: &mut GrayImage, config: &Config) {
+    // In dark mode: slightly darken every other row to increase contrast.
+    // In light mode: slightly lighten every other row for the equivalent effect.
     let mut y = 0u32;
     while y < H {
         for x in 0..W {
-            // Darken every second line a bit more to increase
-            // perceived contrast without losing too much detail.
-            let v = img.get_pixel(x, y)[0].saturating_sub(10);
-            img.put_pixel(x, y, Luma([v]));
+            let v = img.get_pixel(x, y)[0];
+            let adjusted = if config.is_dark() {
+                v.saturating_sub(10)
+            } else {
+                v.saturating_add(10)
+            };
+            img.put_pixel(x, y, Luma([adjusted]));
         }
         y += 2;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
 
 fn format_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
@@ -171,19 +233,22 @@ fn format_uptime(secs: u64) -> String {
     else { format!("{}M", mins) }
 }
 
+// ---------------------------------------------------------------------------
+// Nextcloud
+// ---------------------------------------------------------------------------
+
 fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
     let base = config
         .nextcloud_url
         .clone()
         .unwrap_or_else(|| "https://localhost".to_string());
-    let client: reqwest::blocking::Client = match reqwest::blocking::Client::builder()
+    let client = match reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
         .build() {
         Ok(c) => c,
         Err(_) => return (false, String::new(), 0, base),
     };
-    // Measure latency and extract Nextcloud version from status.php.
     let start = std::time::Instant::now();
     let status_resp = client
         .get(format!("{}/status.php", base))
@@ -202,10 +267,12 @@ fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
         _ => (false, String::new()),
     };
 
-    // If offline, we still return the measured latency for debugging,
-    // but the UI will primarily key off the online flag.
     (online, version, elapsed_ms, base)
 }
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
 
 fn render(
     fb: &Font,
@@ -218,23 +285,24 @@ fn render(
     nc_latency_ms: u32,
     cpu_temp: f32,
     nc_url: &str,
+    config: &Config,
 ) -> GrayImage {
-
-    let mut img = GrayImage::from_pixel(W, H, BG);
-    scanlines(&mut img);
+    let p = Palette::from_config(config);
+    let mut img = GrayImage::from_pixel(W, H, p.bg);
+    scanlines(&mut img, config);
 
     let now = Local::now();
 
     // Header
-    txt(&mut img, fb, "SYS://NEXTCLOUD-NODE", MARGIN, 18, 48.0, BRIGHT);
-    txt_r(&mut img, fb, &now.format("%H:%M").to_string(), W as i32 - MARGIN, 14, 64.0, BRIGHT);
-    txt_r(&mut img, fr, &now.format("%d.%m.%Y").to_string(), W as i32 - MARGIN, 82, 32.0, MID);
-    dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, 110, MID);
-    hline(&mut img, MARGIN, W as i32 - MARGIN, 112, DIM);
+    txt(&mut img, fb, "SYS://NEXTCLOUD-NODE", MARGIN, 18, 48.0, p.bright);
+    txt_r(&mut img, fb, &now.format("%H:%M").to_string(), W as i32 - MARGIN, 14, 64.0, p.bright);
+    txt_r(&mut img, fr, &now.format("%d.%m.%Y").to_string(), W as i32 - MARGIN, 82, 32.0, p.mid);
+    dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, 110, p.mid);
+    hline(&mut img, MARGIN, W as i32 - MARGIN, 112, p.dim);
 
     // Status bar
     let status_str = if nc_online { "[ NEXTCLOUD: ONLINE ]" } else { "[ NEXTCLOUD: OFFLINE ]" };
-    txt(&mut img, fb, status_str, MARGIN, 124, 34.0, if nc_online { BRIGHT } else { DIM });
+    txt(&mut img, fb, status_str, MARGIN, 124, 34.0, if nc_online { p.bright } else { p.dim });
     let ver_label = if nc_online && !nc_version.is_empty() {
         format!("NC VER: {}", nc_version)
     } else {
@@ -245,18 +313,14 @@ fn render(
     } else {
         "LATENCY: N/A".to_string()
     };
-    txt(&mut img, fr, &ver_label, 640, 130, 30.0, MID);
-    txt(&mut img, fr, &lat_label, 1060, 130, 30.0, MID);
+    txt(&mut img, fr, &ver_label, 640, 130, 30.0, p.mid);
+    txt(&mut img, fr, &lat_label, 1060, 130, 30.0, p.mid);
     txt_r(
-        &mut img,
-        fr,
+        &mut img, fr,
         &format!("UPTIME: {}", format_uptime(System::uptime())),
-        W as i32 - MARGIN,
-        130,
-        30.0,
-        MID,
+        W as i32 - MARGIN, 130, 30.0, p.mid,
     );
-    hline(&mut img, MARGIN, W as i32 - MARGIN, 172, DIM);
+    hline(&mut img, MARGIN, W as i32 - MARGIN, 172, p.dim);
 
     // Row 1: stat boxes
     let col_w = (W as i32 - 2 * MARGIN - 3 * 20) / 4;
@@ -268,20 +332,12 @@ fn render(
     let ram_used = sys.used_memory();
     let ram_total = sys.total_memory();
     let bx = MARGIN;
-    corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
-    txt(&mut img, fr, "// RAM", bx + arm + 6, r1y + 8, 24.0, DIM);
-    txt_c(&mut img, fb, &format_bytes(ram_used), bx + col_w / 2, r1y + 40, 62.0, BRIGHT);
-    txt_c(&mut img, fr, &format!("/ {}", format_bytes(ram_total)), bx + col_w / 2, r1y + 114, 28.0, MID);
+    corner_box(&mut img, bx, r1y, col_w, r1h, arm, p.mid);
+    txt(&mut img, fr, "// RAM", bx + arm + 6, r1y + 8, 24.0, p.dim);
+    txt_c(&mut img, fb, &format_bytes(ram_used), bx + col_w / 2, r1y + 40, 62.0, p.bright);
+    txt_c(&mut img, fr, &format!("/ {}", format_bytes(ram_total)), bx + col_w / 2, r1y + 114, 28.0, p.mid);
     let ram_frac = ram_used as f32 / ram_total as f32;
-    txt_c(
-        &mut img,
-        fr,
-        &format!("{:.0}% USED", ram_frac * 100.0),
-        bx + col_w / 2,
-        r1y + 176,
-        22.0,
-        DIM,
-    );
+    txt_c(&mut img, fr, &format!("{:.0}% USED", ram_frac * 100.0), bx + col_w / 2, r1y + 176, 22.0, p.dim);
 
     // DISK
     let disks = Disks::new_with_refreshed_list();
@@ -290,39 +346,31 @@ fn render(
         .map(|d| (d.total_space() - d.available_space(), d.total_space()))
         .unwrap_or((0, 1));
     let bx = MARGIN + col_w + 20;
-    corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
-    txt(&mut img, fr, "// DISK", bx + arm + 6, r1y + 8, 24.0, DIM);
-    txt_c(&mut img, fb, &format_bytes(disk_used), bx + col_w / 2, r1y + 40, 62.0, BRIGHT);
-    txt_c(&mut img, fr, &format!("/ {}", format_bytes(disk_total)), bx + col_w / 2, r1y + 114, 28.0, MID);
+    corner_box(&mut img, bx, r1y, col_w, r1h, arm, p.mid);
+    txt(&mut img, fr, "// DISK", bx + arm + 6, r1y + 8, 24.0, p.dim);
+    txt_c(&mut img, fb, &format_bytes(disk_used), bx + col_w / 2, r1y + 40, 62.0, p.bright);
+    txt_c(&mut img, fr, &format!("/ {}", format_bytes(disk_total)), bx + col_w / 2, r1y + 114, 28.0, p.mid);
     let disk_frac = disk_used as f32 / disk_total as f32;
-    txt_c(
-        &mut img,
-        fr,
-        &format!("{:.0}% USED", disk_frac * 100.0),
-        bx + col_w / 2,
-        r1y + 176,
-        22.0,
-        DIM,
-    );
+    txt_c(&mut img, fr, &format!("{:.0}% USED", disk_frac * 100.0), bx + col_w / 2, r1y + 176, 22.0, p.dim);
 
     // CPU
     let bx = MARGIN + 2 * (col_w + 20);
-    corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
-    txt(&mut img, fr, "// CPU", bx + arm + 6, r1y + 8, 24.0, DIM);
+    corner_box(&mut img, bx, r1y, col_w, r1h, arm, p.mid);
+    txt(&mut img, fr, "// CPU", bx + arm + 6, r1y + 8, 24.0, p.dim);
     let cpu_usage = sys.global_cpu_info().cpu_usage();
-    txt_c(&mut img, fb, &format!("{:.0}%", cpu_usage), bx + col_w / 2, r1y + 40, 80.0, BRIGHT);
-    txt_c(&mut img, fr, "LOAD", bx + col_w / 2, r1y + 176, 22.0, DIM);
+    txt_c(&mut img, fb, &format!("{:.0}%", cpu_usage), bx + col_w / 2, r1y + 40, 80.0, p.bright);
+    txt_c(&mut img, fr, "LOAD", bx + col_w / 2, r1y + 176, 22.0, p.dim);
 
     // TEMP
     let bx = MARGIN + 3 * (col_w + 20);
-    corner_box(&mut img, bx, r1y, col_w, r1h, arm, MID);
-    txt(&mut img, fr, "// TEMP", bx + arm + 6, r1y + 8, 24.0, DIM);
-    txt_c(&mut img, fb, &format!("{:.0}°C", cpu_temp), bx + col_w / 2, r1y + 40, 80.0, BRIGHT);
-    txt_c(&mut img, fr, "CPU TEMP", bx + col_w / 2, r1y + 130, 28.0, MID);
+    corner_box(&mut img, bx, r1y, col_w, r1h, arm, p.mid);
+    txt(&mut img, fr, "// TEMP", bx + arm + 6, r1y + 8, 24.0, p.dim);
+    txt_c(&mut img, fb, &format!("{:.0}°C", cpu_temp), bx + col_w / 2, r1y + 40, 80.0, p.bright);
+    txt_c(&mut img, fr, "CPU TEMP", bx + col_w / 2, r1y + 130, 28.0, p.mid);
 
     // Divider
     let r2y = r1y + r1h + 28;
-    dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, r2y, DIM);
+    dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, r2y, p.dim);
 
     // Row 2: network graphs
     let r2y = r2y + 16;
@@ -330,64 +378,48 @@ fn render(
     let graph_h = 180;
 
     let bx = MARGIN;
-    txt(&mut img, fb, "// UPLOAD", bx, r2y, 30.0, MID);
+    txt(&mut img, fb, "// UPLOAD", bx, r2y, 30.0, p.mid);
     let cur_up = upload_history.back().cloned().unwrap_or(0.0);
-    txt_r(&mut img, fb, &format!("TX: {}", format_speed(cur_up)), bx + graph_w, r2y + 2, 28.0, BRIGHT);
-    corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, DIM);
-    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, upload_history);
-    // Axis descriptors and units
-    txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, DIM);
-    txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
-    txt_c(&mut img, fr, "TX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, DIM);
+    txt_r(&mut img, fb, &format!("TX: {}", format_speed(cur_up)), bx + graph_w, r2y + 2, 28.0, p.bright);
+    corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, p.dim);
+    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, upload_history, &p);
+    txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, p.dim);
+    txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
+    txt_c(&mut img, fr, "TX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, p.dim);
 
     let bx = MARGIN + graph_w + 60;
-    txt(&mut img, fb, "// DOWNLOAD", bx, r2y, 30.0, MID);
+    txt(&mut img, fb, "// DOWNLOAD", bx, r2y, 30.0, p.mid);
     let cur_down = download_history.back().cloned().unwrap_or(0.0);
-    txt_r(&mut img, fb, &format!("RX: {}", format_speed(cur_down)), bx + graph_w, r2y + 2, 28.0, BRIGHT);
-    corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, DIM);
-    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, download_history);
-    txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, DIM);
-    txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, DIM);
-    txt_c(&mut img, fr, "RX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, DIM);
+    txt_r(&mut img, fb, &format!("RX: {}", format_speed(cur_down)), bx + graph_w, r2y + 2, 28.0, p.bright);
+    corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, p.dim);
+    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, download_history, &p);
+    txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, p.dim);
+    txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
+    txt_c(&mut img, fr, "RX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, p.dim);
 
-    // Use the space below the graphs to show Nextcloud connection info.
+    // Nextcloud URL summary
     let summary_y = H as i32 - 96;
-    // Show the configured Nextcloud URL (trim scheme for compactness).
     let display_url = nc_url
         .strip_prefix("https://")
         .or_else(|| nc_url.strip_prefix("http://"))
         .unwrap_or(nc_url);
-    txt(
-        &mut img,
-        fr,
-        &format!("NEXTCLOUD URL: {}", display_url),
-        MARGIN,
-        summary_y,
-        22.0,
-        DIM,
-    );
-    txt(
-        &mut img,
-        fr,
-        "CFG: /etc/thinkbook-eink/server.toml",
-        MARGIN,
-        summary_y + 24,
-        20.0,
-        DIM,
-    );
+    txt(&mut img, fr, &format!("NEXTCLOUD URL: {}", display_url), MARGIN, summary_y, 22.0, p.dim);
+    txt(&mut img, fr, "CFG: /etc/thinkbook-eink/server.toml", MARGIN, summary_y + 24, 20.0, p.dim);
 
     // Footer
     let fy = H as i32 - 44;
-    hline(&mut img, MARGIN, W as i32 - MARGIN, fy, DIM);
-    dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, fy + 2, DIM);
-    txt(&mut img, fr, "THINKBOOK-EINK // GITHUB.COM/LIZARDKING00/THINKBOOK-EINK", MARGIN, fy + 10, 22.0, DIM);
-    txt_r(&mut img, fr, "SYS:NOMINAL", W as i32 - MARGIN, fy + 10, 22.0, DIM);
+    hline(&mut img, MARGIN, W as i32 - MARGIN, fy, p.dim);
+    dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, fy + 2, p.dim);
+    txt(&mut img, fr, "THINKBOOK-EINK // GITHUB.COM/LIZARDKING00/THINKBOOK-EINK", MARGIN, fy + 10, 22.0, p.dim);
+    txt_r(&mut img, fr, "SYS:NOMINAL", W as i32 - MARGIN, fy + 10, 22.0, p.dim);
 
     img
 }
 
-// CHANGED: skip loopback interface so symmetric lo traffic doesn't make
-// upload and download graphs look identical.
+// ---------------------------------------------------------------------------
+// System helpers
+// ---------------------------------------------------------------------------
+
 fn get_network_speeds(_sys: &System, prev_rx: u64, prev_tx: u64, elapsed_secs: f64) -> (f64, f64, u64, u64) {
     let mut total_rx: u64 = 0;
     let mut total_tx: u64 = 0;
@@ -411,8 +443,12 @@ fn get_cpu_temp() -> f32 {
         .max(0.0)
 }
 
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 fn main() -> Result<()> {
-    let config = load_config();
+    let config = Config::load();
     eprintln!("Connecting to E-ink display...");
     let mut it8951 = It8951::connect()?;
     let sys_info = it8951
@@ -422,6 +458,11 @@ fn main() -> Result<()> {
     eprintln!(
         "Connected: {}x{}. Starting server dashboard (Ctrl+C to stop).",
         dw, dh
+    );
+    eprintln!(
+        "Config: theme={}, flip={}",
+        if config.is_dark() { "dark" } else { "light" },
+        config.is_flipped()
     );
 
     let font_bold = load_font(true);
@@ -442,16 +483,14 @@ fn main() -> Result<()> {
             get_network_speeds(&sys, prev_rx, prev_tx, elapsed);
         prev_rx = total_rx;
         prev_tx = total_tx;
-        if upload_history.len() == 60 {
-            upload_history.pop_front();
-        }
-        if download_history.len() == 60 {
-            download_history.pop_front();
-        }
+        if upload_history.len() == 60 { upload_history.pop_front(); }
+        if download_history.len() == 60 { download_history.pop_front(); }
         upload_history.push_back(tx_speed);
         download_history.push_back(rx_speed);
+
         let cpu_temp = get_cpu_temp();
         let (nc_online, nc_version, nc_latency_ms, nc_url) = check_nextcloud(&config);
+
         let img = render(
             &font_bold,
             &font_reg,
@@ -463,18 +502,25 @@ fn main() -> Result<()> {
             nc_latency_ms,
             cpu_temp,
             &nc_url,
+            &config,
         );
-        let prepared = DynamicImage::ImageLuma8(img);
 
-        // First flash to a pure white frame in GC16 to scrub old content,
-        // then draw the new frame (DU for faster update / less wear).
-        let clear_img = GrayImage::from_pixel(dw, dh, Luma([255u8]));
+        let mut prepared = DynamicImage::ImageLuma8(img);
+        if config.is_flipped() {
+            prepared = DynamicImage::ImageLuma8(imageops::rotate180(&prepared.to_luma8()));
+        }
+
+        // Clear with a white (dark mode) or black (light mode) GC16 frame to
+        // scrub ghosting, then draw the new frame with DU.
+        let clear_pixel = if config.is_dark() { Luma([255u8]) } else { Luma([0u8]) };
+        let clear_img = GrayImage::from_pixel(dw, dh, clear_pixel);
         let clear_dyn = DynamicImage::ImageLuma8(clear_img);
         it8951.load_region(&clear_dyn, 0, 0)?;
         it8951.display_region(0, 0, dw, dh, Mode::GC16)?;
 
         it8951.load_region(&prepared, 0, 0)?;
         it8951.display_region(0, 0, dw, dh, Mode::DU)?;
+
         eprintln!(
             "[{}] RAM:{:.0}% CPU:{:.0}% TEMP:{:.0}C TX:{} RX:{} NC:{}",
             Local::now().format("%H:%M:%S"),
@@ -485,9 +531,7 @@ fn main() -> Result<()> {
             format_speed(rx_speed),
             if nc_online { "ONLINE" } else { "OFFLINE" }
         );
-        // First iteration: align to the next full minute boundary (e.g. 11:30:00)
-        // to synchronise with the on-screen clock. Afterwards, use a fixed 60s
-        // interval for more stable timing.
+
         if first_tick {
             let now = Local::now();
             let secs_remaining = 60 - now.second();

@@ -55,6 +55,25 @@ bash install.sh
 
 Then **log out and back in** for the udev group change to take effect. After that all commands work without sudo.
 
+To run `eink-server` automatically on boot, install it as a systemd service:
+
+```bash
+# Copy and edit the service file (replace REPLACE_ME_WITH_YOUR_USERNAME)
+sudo cp eink-server.service /etc/systemd/system/
+sudo nano /etc/systemd/system/eink-server.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now eink-server
+```
+
+To update the binary while the service is running, stop it first — the OS will refuse to overwrite a running executable:
+
+```bash
+sudo systemctl stop eink-server
+sudo cp target/release/eink-server /usr/local/bin/eink-server
+sudo systemctl start eink-server
+```
+
 ---
 
 ## Usage
@@ -107,10 +126,10 @@ The dashboard **updates once per minute**.
 
 To minimise E‑ink ghosting while keeping updates reliable:
 
-- On each refresh `eink-server` first draws a **white frame in GC16 mode** to scrub previous content.
+- On each refresh `eink-server` first draws a **GC16 clear frame** to scrub previous content (white in dark theme, black in light theme).
 - It then renders the new dashboard frame in **DU mode**, which matches the behaviour of `eink-clock` for fast, low-flicker updates.
 
-This means you may see a brief white flash once per minute, but the resulting image is much clearer and does not accumulate previous images (for example, after using `setbackside` to show a photo).
+This means you may see a brief flash once per minute, but the resulting image is much clearer and does not accumulate previous images (for example, after using `setbackside` to show a photo).
 
 Rough layout (simplified ASCII preview):
 
@@ -166,7 +185,55 @@ The driver exposes the following IT8951 refresh modes:
 | `Init` | Blank flash | — | Clearing between images |
 
 `setbackside` uses `GC16` (best quality). `eink-clock` uses `DU` (fast, minimal flicker).  
-`eink-server` combines both: a GC16 white wipe to clear ghosts, followed by DU for the actual dashboard frame.
+`eink-server` combines both: a GC16 clear frame to scrub ghosts (colour depends on theme), followed by DU for the actual dashboard frame.
+
+---
+
+## Configuration
+
+All tools read `/etc/thinkbook-eink/server.toml` at startup. All keys are optional — omitting them keeps the defaults.
+
+```toml
+# Rotate the display 180 degrees.
+# Useful if the laptop is mounted upside down or the lid is physically inverted.
+# Default: false
+#flip = true
+
+# Colour theme.
+# "dark"  = dark background, bright text (default)
+# "light" = light background, dark text
+#theme = "light"
+
+# Nextcloud URL (no trailing slash) — eink-server only
+#nextcloud_url = "https://localhost"
+
+# Nextcloud credentials for version/latency checks — eink-server only
+# Leave empty to skip; online/offline detection still works via status.php.
+#nextcloud_user = "admin"
+#nextcloud_password = "your-password-here"
+```
+
+A commented-out example is included in `server.toml.example`.
+
+### Applying config changes
+
+If `eink-server` is running as a systemd service, restart it after editing the config:
+
+```bash
+sudo systemctl restart eink-server
+```
+
+To follow the logs and confirm the new settings were picked up:
+
+```bash
+journalctl -u eink-server -f
+```
+
+The startup line will show the active theme and flip state, for example:
+
+```
+Config: theme=light, flip=true
+```
 
 ---
 
@@ -242,3 +309,7 @@ MIT — see [LICENSE](LICENSE)
 - Protocol reverse engineering based on [rust-it8951](https://github.com/faassen/rust-it8951) by Martijn Faassen
 - ITE IT8951 USB Programming Guide (public documentation)
 - Discovered and adapted for the ThinkBook Plus Gen 1 by [LizardKing00](https://github.com/LizardKing00)
+
+## Aditional Advice 
+
+[This great 3D-printable wall mount works well with Thinkbooks and allows an unobstructed view of the e-ink display.](https://www.printables.com/model/1559980-laptop-wall-mount)
