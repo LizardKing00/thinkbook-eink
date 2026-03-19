@@ -118,7 +118,9 @@ eink-server
 Shows a full-screen “server dashboard” with:
 
 - **Header**: hostname label, current time and date
-- **Status bar**: Nextcloud online/offline state, total users (optional), system uptime
+- **Status bar (row 1)**: Nextcloud online/offline state, NC version, latency, system uptime
+- **Status bar (row 2)**: Active Nextcloud users (last 5 min / 1 hour / 24 hours), update alerts
+- **Update alerts**: Warning when Nextcloud app updates or a core update are available (shown with ⚠ symbol)
 - **Stats row**: RAM usage, root disk usage, CPU load, CPU temperature
 - **Graphs**: upload/download network history
 
@@ -137,7 +139,8 @@ Rough layout (simplified ASCII preview):
 +--------------------------------------------------------------------------------------+
 | SYS://NEXTCLOUD-NODE                                  10:32              04.03.2026  |
 |--------------------------------------------------------------------------------------|
-| [ NEXTCLOUD: ONLINE ]    TOTAL USERS: 3      UPTIME: 2D 04H 13M   UPDATED: 10:32     |
+| [ NEXTCLOUD: ONLINE ]  NC VER: 31.0.0  LATENCY: 42MS          UPTIME: 2D 04H 13M   |
+| USERS: 1/3/5 (5M/1H/24H)  ⚠ 3 APP UPDATES PENDING     ⚠ CORE UPDATE PENDING       |
 |--------------------------------------------------------------------------------------|
 |  // RAM        |  // DISK       |  // CPU        |  // TEMP                          |
 |                |                |      23%       |        55°C                       |
@@ -211,6 +214,14 @@ All tools read `/etc/thinkbook-eink/server.toml` at startup. All keys are option
 # Leave empty to skip; online/offline detection still works via status.php.
 #nextcloud_user = "admin"
 #nextcloud_password = "your-password-here"
+
+# Nextcloud app token (recommended over password) — eink-server only
+# Generate one in Nextcloud: Settings -> Security -> Devices & sessions.
+# When set, nextcloud_password is ignored for status.php checks.
+# For serverinfo API (active users, app updates), this token is sent via
+# the NC-Token header. Set it in Nextcloud with:
+#   occ config:app:set serverinfo token --value YOUR_TOKEN
+#nextcloud_token = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 ```
 
 A commented-out example is included in `server.toml.example`.

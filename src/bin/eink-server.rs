@@ -38,6 +38,7 @@ struct Config {
     nextcloud_url: Option<String>,
     nextcloud_user: Option<String>,
     nextcloud_password: Option<String>,
+    nextcloud_token: Option<String>,
 }
 
 impl Config {
@@ -237,11 +238,29 @@ fn format_uptime(secs: u64) -> String {
 // Nextcloud
 // ---------------------------------------------------------------------------
 
-fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
-    let base = config
+fn nc_base_url(config: &Config) -> String {
+    config
         .nextcloud_url
-        .clone()
-        .unwrap_or_else(|| "https://localhost".to_string());
+        .as_deref()
+        .unwrap_or("https://localhost")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn apply_nc_auth(req: reqwest::blocking::RequestBuilder, config: &Config) -> reqwest::blocking::RequestBuilder {
+    if let Some(user) = config.nextcloud_user.as_deref() {
+        if let Some(token) = config.nextcloud_token.as_deref() {
+            return req.basic_auth(user, Some(token));
+        }
+        if let Some(pass) = config.nextcloud_password.as_deref() {
+            return req.basic_auth(user, Some(pass));
+        }
+    }
+    req
+}
+
+fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
+    let base = nc_base_url(config);
     let client = match reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
@@ -250,9 +269,8 @@ fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
         Err(_) => return (false, String::new(), 0, base),
     };
     let start = std::time::Instant::now();
-    let status_resp = client
-        .get(format!("{}/status.php", base))
-        .send();
+    let req = client.get(format!("{}/status.php", base));
+    let status_resp = apply_nc_auth(req, config).send();
     let elapsed_ms = start.elapsed().as_millis() as u32;
 
     let (online, version) = match status_resp {
@@ -270,6 +288,77 @@ fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
     (online, version, elapsed_ms, base)
 }
 
+/// Fetch rich server info from the Nextcloud serverinfo API.
+/// Returns (active_5m, active_1h, active_24h, app_updates, core_update_available).
+fn fetch_serverinfo(config: &Config) -> (u64, u64, u64, u64, bool) {
+    let defaults = (0, 0, 0, 0, false);
+    let base = match config.nextcloud_url.as_deref() {
+        Some(_) => nc_base_url(config),
+        None => return defaults,
+    };
+    // Need either a serverinfo token (NC-Token header) or user+password/app-password
+    let has_token = config.nextcloud_token.is_some();
+    let has_basic = config.nextcloud_user.is_some()
+        && (config.nextcloud_token.is_some() || config.nextcloud_password.is_some());
+    if !has_token && !has_basic {
+        return defaults;
+    }
+    let client = match reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build() {
+        Ok(c) => c,
+        Err(_) => return defaults,
+    };
+    let url = format!("{}/ocs/v2.php/apps/serverinfo/api/v1/info?format=json", base);
+    eprintln!("[serverinfo] fetching {}", url);
+    let mut req = client.get(&url).header("OCS-APIRequest", "true");
+    // Serverinfo supports its own token via NC-Token header (set via occ).
+    // When using NC-Token, do NOT also send Basic Auth — it would conflict.
+    if let Some(token) = config.nextcloud_token.as_deref() {
+        req = req.header("NC-Token", token);
+    } else {
+        req = apply_nc_auth(req, config);
+    }
+    let resp = match req.send() {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            eprintln!("[serverinfo] HTTP {}", r.status());
+            return defaults;
+        }
+        Err(e) => {
+            eprintln!("[serverinfo] request failed: {}", e);
+            return defaults;
+        }
+    };
+    let json: serde_json::Value = match resp.json() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[serverinfo] JSON parse error: {}", e);
+            return defaults;
+        }
+    };
+    let data = &json["ocs"]["data"];
+
+    let active_5m = data["activeUsers"]["last5minutes"].as_u64().unwrap_or(0);
+    let active_1h = data["activeUsers"]["last1hour"].as_u64().unwrap_or(0);
+    let active_24h = data["activeUsers"]["last24hours"].as_u64().unwrap_or(0);
+
+    let app_updates = data["nextcloud"]["system"]["apps"]["num_updates_available"]
+        .as_u64()
+        .unwrap_or(0);
+    let core_update_val = &data["nextcloud"]["system"]["update"]["available"];
+    let core_update = core_update_val.as_bool().unwrap_or(false)
+        || core_update_val.as_str().map(|s| !s.is_empty()).unwrap_or(false);
+
+    eprintln!(
+        "[serverinfo] users={}/{}/{} app_updates={} core_update={}",
+        active_5m, active_1h, active_24h, app_updates, core_update
+    );
+
+    (active_5m, active_1h, active_24h, app_updates, core_update)
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -285,6 +374,11 @@ fn render(
     nc_latency_ms: u32,
     cpu_temp: f32,
     nc_url: &str,
+    nc_active_5m: u64,
+    nc_active_1h: u64,
+    nc_active_24h: u64,
+    nc_app_updates: u64,
+    nc_core_update: bool,
     config: &Config,
 ) -> GrayImage {
     let p = Palette::from_config(config);
@@ -300,9 +394,9 @@ fn render(
     dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, 110, p.mid);
     hline(&mut img, MARGIN, W as i32 - MARGIN, 112, p.dim);
 
-    // Status bar
+    // Status bar — row 1
     let status_str = if nc_online { "[ NEXTCLOUD: ONLINE ]" } else { "[ NEXTCLOUD: OFFLINE ]" };
-    txt(&mut img, fb, status_str, MARGIN, 124, 34.0, if nc_online { p.bright } else { p.dim });
+    txt(&mut img, fb, status_str, MARGIN, 118, 30.0, if nc_online { p.bright } else { p.dim });
     let ver_label = if nc_online && !nc_version.is_empty() {
         format!("NC VER: {}", nc_version)
     } else {
@@ -313,19 +407,34 @@ fn render(
     } else {
         "LATENCY: N/A".to_string()
     };
-    txt(&mut img, fr, &ver_label, 640, 130, 30.0, p.mid);
-    txt(&mut img, fr, &lat_label, 1060, 130, 30.0, p.mid);
+    txt(&mut img, fr, &ver_label, 580, 120, 28.0, p.mid);
+    txt(&mut img, fr, &lat_label, 980, 120, 28.0, p.mid);
     txt_r(
         &mut img, fr,
         &format!("UPTIME: {}", format_uptime(System::uptime())),
-        W as i32 - MARGIN, 130, 30.0, p.mid,
+        W as i32 - MARGIN, 120, 28.0, p.mid,
     );
-    hline(&mut img, MARGIN, W as i32 - MARGIN, 172, p.dim);
+
+    // Status bar — row 2
+    let users_label = if nc_online && (nc_active_5m > 0 || nc_active_1h > 0 || nc_active_24h > 0) {
+        format!("USERS: {}/{}/{} (5M/1H/24H)", nc_active_5m, nc_active_1h, nc_active_24h)
+    } else {
+        "USERS: -/-/- (5M/1H/24H)".to_string()
+    };
+    txt(&mut img, fr, &users_label, MARGIN, 152, 26.0, p.mid);
+    if nc_app_updates > 0 {
+        let alert = format!("\u{26A0} {} APP UPDATES PENDING", nc_app_updates);
+        txt(&mut img, fb, &alert, 560, 150, 26.0, p.bright);
+    }
+    if nc_core_update {
+        txt(&mut img, fb, "\u{26A0} CORE UPDATE PENDING", 1060, 150, 26.0, p.bright);
+    }
+    hline(&mut img, MARGIN, W as i32 - MARGIN, 182, p.dim);
 
     // Row 1: stat boxes
     let col_w = (W as i32 - 2 * MARGIN - 3 * 20) / 4;
     let arm = 18;
-    let r1y = 188;
+    let r1y = 198;
     let r1h = 198;
 
     // RAM
@@ -473,7 +582,6 @@ fn main() -> Result<()> {
     let mut prev_rx: u64 = 0;
     let mut prev_tx: u64 = 0;
     let mut last_tick = std::time::Instant::now();
-    let mut first_tick = true;
 
     loop {
         sys.refresh_all();
@@ -490,6 +598,8 @@ fn main() -> Result<()> {
 
         let cpu_temp = get_cpu_temp();
         let (nc_online, nc_version, nc_latency_ms, nc_url) = check_nextcloud(&config);
+        let (nc_active_5m, nc_active_1h, nc_active_24h, nc_app_updates, nc_core_update) =
+            fetch_serverinfo(&config);
 
         let img = render(
             &font_bold,
@@ -502,6 +612,11 @@ fn main() -> Result<()> {
             nc_latency_ms,
             cpu_temp,
             &nc_url,
+            nc_active_5m,
+            nc_active_1h,
+            nc_active_24h,
+            nc_app_updates,
+            nc_core_update,
             &config,
         );
 
@@ -532,14 +647,15 @@ fn main() -> Result<()> {
             if nc_online { "ONLINE" } else { "OFFLINE" }
         );
 
-        if first_tick {
-            let now = Local::now();
-            let secs_remaining = 60 - now.second();
-            let sleep_secs = if secs_remaining == 0 { 60 } else { secs_remaining as u64 };
-            first_tick = false;
-            thread::sleep(Duration::from_secs(sleep_secs));
-        } else {
-            thread::sleep(Duration::from_secs(60));
-        }
+        // Sleep until the start of the next minute
+        let now = Local::now();
+        let secs_remaining = 60 - now.second();
+        let nanos_remaining = 1_000_000_000 - now.nanosecond() % 1_000_000_000;
+        let sleep_dur = Duration::from_secs(secs_remaining as u64)
+            - Duration::from_nanos(now.nanosecond() as u64 % 1_000_000_000)
+            + Duration::from_nanos(nanos_remaining as u64);
+        // Clamp to avoid sleeping 0 or negative after arithmetic edge cases
+        let sleep_dur = sleep_dur.max(Duration::from_secs(1));
+        thread::sleep(sleep_dur);
     }
 }

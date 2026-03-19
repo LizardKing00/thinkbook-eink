@@ -26,3 +26,8 @@
 # Leave empty to skip (online/offline detection still works via status.php).
 #nextcloud_user = "admin"
 #nextcloud_password = "your-password-here"
+
+# Nextcloud app token (recommended over password).
+# Generate one in Nextcloud: Settings -> Security -> Devices & sessions.
+# When set, nextcloud_password is ignored. Requires nextcloud_user to be set.
+#nextcloud_token = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
