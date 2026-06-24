@@ -36,4 +36,4 @@ reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls"], def
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-rust-it8951 = { path = "../rust-it8951" }
+rust-it8951 = { git = "https://github.com/faassen/rust-it8951" }
