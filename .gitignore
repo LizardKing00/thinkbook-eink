@@ -24,3 +24,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Local notes on where real credentials live — never for git
+SECRETS.md
