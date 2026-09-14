@@ -45,3 +45,19 @@
 # Generate one in Nextcloud: Settings -> Security -> Devices & sessions.
 # When set, nextcloud_password is ignored. Requires nextcloud_user to be set.
 #nextcloud_token = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
+
+# ---------------------------------------------------------------------------
+# Optional service widgets (eink-server only)
+# ---------------------------------------------------------------------------
+
+# Widgets shown one at a time in the lower-right panel, rotating every ~5
+# minutes. Each entry here is a widget name; a widget only runs (and only
+# ever fires requests) if it's listed here. Leave unset/empty and the panel
+# shows "NO WIDGETS ENABLED" and nothing else runs.
+#
+# Available widgets:
+#   "docker" - running/stopped container counts via `docker ps`. Requires
+#              the Docker CLI to be installed and the user running
+#              eink-server to have permission to use it (member of the
+#              `docker` group, or equivalent).
+#enabled_widgets = ["docker"]

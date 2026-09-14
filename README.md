@@ -122,7 +122,9 @@ Shows a full-screen “server dashboard” with:
 - **Status bar (row 2)**: Active Nextcloud users (last 5 min / 1 hour / 24 hours), update alerts
 - **Update alerts**: Warning when Nextcloud app updates or a core update are available (shown with ⚠ symbol)
 - **Stats row**: RAM usage, root disk usage, CPU load, CPU temperature
-- **Graphs**: upload/download network history
+- **Graphs**: upload/download network history, on a shared scale
+- **Nextcloud detail panel**: PHP/database version, installed app count, file count, share breakdown, free space — pulled from the same serverinfo call used for active users, so it's free once you've already set up `nextcloud_token`
+- **Service widget panel**: optional, rotates every ~5 minutes through whichever services you enable in `enabled_widgets` (see [Configuration](#configuration)) — empty and invisible if you enable none
 
 The dashboard **updates once per minute**.
 
@@ -152,7 +154,13 @@ Rough layout (simplified ASCII preview):
 |        SPEED                                SPEED                                    |
 |        TIME →                              TIME →                                    |
 |  TX MB/S (LAST 60 MIN)            RX MB/S (LAST 60 MIN)                              |
-|                                                                                      |
+|--------------------------------------------------------------------------------------|
+| // NEXTCLOUD             |  // SERVICES                            ● DOCKER ○ ...   |
+|  PHP 8.3.1 / MARIADB ... |                                                           |
+|  APPS INSTALLED: 42      |             24 CONTAINERS RUNNING                        |
+|  FILES: 1.24M            |                  0 STOPPED                               |
+|  SHARES: 128/14/6        |                                                           |
+|  FREE SPACE: 82.4 GB     |        DOCKER (1/1) — NEXT: DOCKER IN 5M                 |
 |  NEXTCLOUD URL: nextcloud.example.com                                                |
 |  CFG: /etc/thinkbook-eink/server.toml                                                |
 +--------------------------------------------------------------------------------------+
@@ -230,6 +238,17 @@ All tools read `/etc/thinkbook-eink/server.toml` at startup. All keys are option
 # the NC-Token header. Set it in Nextcloud with:
 #   occ config:app:set serverinfo token --value YOUR_TOKEN
 #nextcloud_token = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
+
+# Optional service widgets — eink-server only.
+# Shown one at a time in the lower-right panel, rotating every ~5 minutes.
+# A widget only runs (and only ever fires requests) if it's listed here;
+# leave unset and the panel shows "NO WIDGETS ENABLED" and nothing runs.
+#
+# Available widgets:
+#   "docker" - running/stopped container counts via `docker ps`. Requires
+#              the Docker CLI and permission to use it (the user running
+#              eink-server must be in the `docker` group, or equivalent).
+#enabled_widgets = ["docker"]
 ```
 
 A commented-out example is included in `server.toml.example`.

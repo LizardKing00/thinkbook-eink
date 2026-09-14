@@ -40,6 +40,7 @@ struct Config {
     nextcloud_password: Option<String>,
     nextcloud_token: Option<String>,
     network_interface: Option<String>,
+    enabled_widgets: Option<Vec<String>>,
 }
 
 impl Config {
@@ -61,6 +62,103 @@ impl Config {
     fn is_dark(&self) -> bool {
         matches!(self.theme.as_ref().unwrap_or(&Theme::Dark), Theme::Dark)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Optional service widgets (lower-right rotating panel)
+// ---------------------------------------------------------------------------
+
+// A widget only ever fetches data or draws if its name appears in the
+// user's `enabled_widgets` config list. Someone who never adds it there
+// pays no runtime cost and sees nothing related to it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WidgetKind {
+    Docker,
+}
+
+impl WidgetKind {
+    fn parse(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "docker" => Some(WidgetKind::Docker),
+            _ => None,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            WidgetKind::Docker => "DOCKER",
+        }
+    }
+}
+
+fn enabled_widget_kinds(config: &Config) -> Vec<WidgetKind> {
+    config
+        .enabled_widgets
+        .as_ref()
+        .map(|list| list.iter().filter_map(|s| WidgetKind::parse(s)).collect())
+        .unwrap_or_default()
+}
+
+struct DockerStatus {
+    running: u32,
+    stopped: Vec<String>,
+}
+
+/// Shells out to `docker ps`. Returns None if Docker isn't installed, isn't
+/// running, or the current user lacks permission — the widget then shows
+/// an "unavailable" state instead of drawing anything misleading.
+fn get_docker_status() -> Option<DockerStatus> {
+    let output = std::process::Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Names}}\t{{.State}}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut running = 0u32;
+    let mut stopped = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let name = parts.next().unwrap_or("");
+        let state = parts.next().unwrap_or("");
+        if state == "running" {
+            running += 1;
+        } else if !name.is_empty() {
+            stopped.push(name.to_string());
+        }
+    }
+    Some(DockerStatus { running, stopped })
+}
+
+fn format_stopped(names: &[String]) -> String {
+    if names.is_empty() {
+        return "0 STOPPED".to_string();
+    }
+    if names.len() <= 3 {
+        format!("{} STOPPED: {}", names.len(), names.join(", "))
+    } else {
+        format!(
+            "{} STOPPED: {}, +{} MORE",
+            names.len(),
+            names[..3].join(", "),
+            names.len() - 3
+        )
+    }
+}
+
+enum WidgetContent {
+    Docker(DockerStatus),
+}
+
+/// State for the lower-right rotating widget panel: which widgets are
+/// enabled, which one is active this render, its fetched data (if any),
+/// and how many ticks remain before rotating to the next one.
+struct WidgetPanelState {
+    enabled: Vec<WidgetKind>,
+    active_idx: usize,
+    content: Option<WidgetContent>,
+    ticks_remaining: u32,
 }
 
 struct Palette {
@@ -225,6 +323,16 @@ fn format_speed(bps: f64) -> String {
     }
 }
 
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 fn format_uptime(secs: u64) -> String {
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
@@ -288,10 +396,36 @@ fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
     (online, version, elapsed_ms, base)
 }
 
+#[derive(Default)]
+struct ServerInfo {
+    active_5m: u64,
+    active_1h: u64,
+    active_24h: u64,
+    app_updates: u64,
+    core_update: bool,
+    php_version: String,
+    db_type: String,
+    db_version: String,
+    apps_installed: u64,
+    num_files: u64,
+    shares_user: u64,
+    shares_group: u64,
+    shares_link: u64,
+    free_space: u64,
+}
+
+impl ServerInfo {
+    /// True once we've actually populated data from a serverinfo response,
+    /// as opposed to the all-zero/empty defaults returned when Nextcloud
+    /// isn't configured, unreachable, or the JSON shape didn't match.
+    fn has_detail(&self) -> bool {
+        !self.php_version.is_empty() || self.apps_installed > 0 || self.num_files > 0
+    }
+}
+
 /// Fetch rich server info from the Nextcloud serverinfo API.
-/// Returns (active_5m, active_1h, active_24h, app_updates, core_update_available).
-fn fetch_serverinfo(config: &Config) -> (u64, u64, u64, u64, bool) {
-    let defaults = (0, 0, 0, 0, false);
+fn fetch_serverinfo(config: &Config) -> ServerInfo {
+    let defaults = ServerInfo::default();
     let base = match config.nextcloud_url.as_deref() {
         Some(_) => nc_base_url(config),
         None => return defaults,
@@ -351,12 +485,30 @@ fn fetch_serverinfo(config: &Config) -> (u64, u64, u64, u64, bool) {
     let core_update = core_update_val.as_bool().unwrap_or(false)
         || core_update_val.as_str().map(|s| !s.is_empty()).unwrap_or(false);
 
+    // Best-effort paths per the Nextcloud serverinfo app's documented JSON
+    // shape — if a field lives elsewhere on a given Nextcloud version, it
+    // just falls back to empty/0 and the detail panel shows "NO SERVERINFO
+    // DATA" instead of misleading zeros (see ServerInfo::has_detail).
+    let php_version = data["server"]["php"]["version"].as_str().unwrap_or("").to_string();
+    let db_type = data["server"]["database"]["type"].as_str().unwrap_or("").to_string();
+    let db_version = data["server"]["database"]["version"].as_str().unwrap_or("").to_string();
+    let apps_installed = data["nextcloud"]["system"]["apps"]["num_installed"].as_u64().unwrap_or(0);
+    let num_files = data["nextcloud"]["storage"]["num_files"].as_u64().unwrap_or(0);
+    let shares_user = data["nextcloud"]["shares"]["num_shares_user"].as_u64().unwrap_or(0);
+    let shares_group = data["nextcloud"]["shares"]["num_shares_groups"].as_u64().unwrap_or(0);
+    let shares_link = data["nextcloud"]["shares"]["num_shares_link"].as_u64().unwrap_or(0);
+    let free_space = data["nextcloud"]["system"]["freespace"].as_u64().unwrap_or(0);
+
     eprintln!(
         "[serverinfo] users={}/{}/{} app_updates={} core_update={}",
         active_5m, active_1h, active_24h, app_updates, core_update
     );
 
-    (active_5m, active_1h, active_24h, app_updates, core_update)
+    ServerInfo {
+        active_5m, active_1h, active_24h, app_updates, core_update,
+        php_version, db_type, db_version, apps_installed, num_files,
+        shares_user, shares_group, shares_link, free_space,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,11 +526,8 @@ fn render(
     nc_latency_ms: u32,
     cpu_temp: f32,
     nc_url: &str,
-    nc_active_5m: u64,
-    nc_active_1h: u64,
-    nc_active_24h: u64,
-    nc_app_updates: u64,
-    nc_core_update: bool,
+    info: &ServerInfo,
+    widget: &WidgetPanelState,
     config: &Config,
 ) -> GrayImage {
     let p = Palette::from_config(config);
@@ -416,17 +565,17 @@ fn render(
     );
 
     // Status bar — row 2
-    let users_label = if nc_online && (nc_active_5m > 0 || nc_active_1h > 0 || nc_active_24h > 0) {
-        format!("USERS: {}/{}/{} (5M/1H/24H)", nc_active_5m, nc_active_1h, nc_active_24h)
+    let users_label = if nc_online && (info.active_5m > 0 || info.active_1h > 0 || info.active_24h > 0) {
+        format!("USERS: {}/{}/{} (5M/1H/24H)", info.active_5m, info.active_1h, info.active_24h)
     } else {
         "USERS: -/-/- (5M/1H/24H)".to_string()
     };
     txt(&mut img, fr, &users_label, MARGIN, 152, 26.0, p.mid);
-    if nc_app_updates > 0 {
-        let alert = format!("\u{26A0} {} APP UPDATES PENDING", nc_app_updates);
+    if info.app_updates > 0 {
+        let alert = format!("\u{26A0} {} APP UPDATES PENDING", info.app_updates);
         txt(&mut img, fb, &alert, 560, 150, 26.0, p.bright);
     }
-    if nc_core_update {
+    if info.core_update {
         txt(&mut img, fb, "\u{26A0} CORE UPDATE PENDING", 1060, 150, 26.0, p.bright);
     }
     hline(&mut img, MARGIN, W as i32 - MARGIN, 182, p.dim);
@@ -511,6 +660,72 @@ fn render(
     txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, p.dim);
     txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
     txt_c(&mut img, fr, "RX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, p.dim);
+
+    // Row 3: static Nextcloud detail panel (left) + rotating widget panel (right).
+    // Left is narrower since the Nextcloud URL/config lines sit below it;
+    // right extends further down to use that same space, since it has
+    // nothing below it.
+    let r3y = r2y + 38 + graph_h + 54;
+    let left_w = 620;
+    let left_h = 252;
+    let gap = 40;
+    let right_x = MARGIN + left_w + gap;
+    let right_w = (W as i32 - MARGIN) - right_x;
+    let right_h = 310;
+
+    // Left: Nextcloud detail (static, always on when Nextcloud is configured)
+    let bx = MARGIN;
+    corner_box(&mut img, bx, r3y, left_w, left_h, arm, p.dim);
+    txt(&mut img, fr, "// NEXTCLOUD", bx + 10, r3y + 8, 24.0, p.dim);
+    if info.has_detail() {
+        let lx = bx + 10;
+        let mut ly = r3y + 46;
+        let db = if info.db_type.is_empty() { "-".to_string() } else { info.db_type.to_uppercase() };
+        let db_ver = if info.db_version.is_empty() { "-" } else { &info.db_version };
+        let php = if info.php_version.is_empty() { "-" } else { &info.php_version };
+        txt(&mut img, fr, &format!("PHP {} / {} {}", php, db, db_ver), lx, ly, 22.0, p.bright); ly += 34;
+        txt(&mut img, fr, &format!("APPS INSTALLED: {}", info.apps_installed), lx, ly, 22.0, p.bright); ly += 34;
+        txt(&mut img, fr, &format!("FILES: {}", format_count(info.num_files)), lx, ly, 22.0, p.bright); ly += 34;
+        txt(&mut img, fr, &format!("SHARES: {} USR / {} GRP / {} LINK", info.shares_user, info.shares_group, info.shares_link), lx, ly, 22.0, p.bright); ly += 34;
+        txt(&mut img, fr, &format!("FREE SPACE: {}", format_bytes(info.free_space)), lx, ly, 22.0, p.bright);
+    } else {
+        txt(&mut img, fr, "NO SERVERINFO DATA", bx + 10, r3y + 46, 22.0, p.dim);
+    }
+
+    // Right: rotating optional-service widget panel
+    corner_box(&mut img, right_x, r3y, right_w, right_h, arm, p.dim);
+    txt(&mut img, fr, "// SERVICES", right_x + 10, r3y + 8, 24.0, p.dim);
+    if widget.enabled.is_empty() {
+        txt_c(&mut img, fr, "NO WIDGETS ENABLED", right_x + right_w / 2, r3y + right_h / 2, 22.0, p.dim);
+    } else {
+        let dots: String = widget.enabled.iter().enumerate()
+            .map(|(i, w)| format!("{} {}", if i == widget.active_idx { "\u{25CF}" } else { "\u{25CB}" }, w.label()))
+            .collect::<Vec<_>>().join("  ");
+        txt_r(&mut img, fr, &dots, right_x + right_w - 10, r3y + 8, 22.0, p.bright);
+
+        let cx = right_x + right_w / 2;
+        match &widget.content {
+            Some(WidgetContent::Docker(status)) => {
+                txt_c(&mut img, fb, &format!("{} CONTAINERS RUNNING", status.running), cx, r3y + 130, 56.0, p.bright);
+                let stopped_color = if status.stopped.is_empty() { p.mid } else { p.bright };
+                txt_c(&mut img, fr, &format_stopped(&status.stopped), cx, r3y + 168, 26.0, stopped_color);
+            }
+            None => {
+                txt_c(&mut img, fr, &format!("{}: UNAVAILABLE", widget.enabled[widget.active_idx].label()), cx, r3y + right_h / 2, 26.0, p.dim);
+            }
+        }
+
+        let next = widget.enabled[(widget.active_idx + 1) % widget.enabled.len()];
+        let caption = format!(
+            "{} ({}/{}) \u{2014} NEXT: {} IN {}M",
+            widget.enabled[widget.active_idx].label(),
+            widget.active_idx + 1,
+            widget.enabled.len(),
+            next.label(),
+            widget.ticks_remaining,
+        );
+        txt_c(&mut img, fr, &caption, cx, r3y + right_h - 16, 18.0, p.dim);
+    }
 
     // Nextcloud URL summary
     let summary_y = H as i32 - 96;
@@ -605,6 +820,8 @@ fn main() -> Result<()> {
     let mut prev_rx: u64 = 0;
     let mut prev_tx: u64 = 0;
     let mut last_tick = std::time::Instant::now();
+    let mut widget_tick: u32 = 0;
+    const WIDGET_ROTATE_TICKS: u32 = 5; // ~5 minutes, one render loop tick ≈ 1 minute
 
     loop {
         sys.refresh_all();
@@ -621,8 +838,20 @@ fn main() -> Result<()> {
 
         let cpu_temp = get_cpu_temp();
         let (nc_online, nc_version, nc_latency_ms, nc_url) = check_nextcloud(&config);
-        let (nc_active_5m, nc_active_1h, nc_active_24h, nc_app_updates, nc_core_update) =
-            fetch_serverinfo(&config);
+        let info = fetch_serverinfo(&config);
+
+        let enabled = enabled_widget_kinds(&config);
+        let widget = if enabled.is_empty() {
+            WidgetPanelState { enabled, active_idx: 0, content: None, ticks_remaining: 0 }
+        } else {
+            let active_idx = (widget_tick / WIDGET_ROTATE_TICKS) as usize % enabled.len();
+            let ticks_remaining = WIDGET_ROTATE_TICKS - (widget_tick % WIDGET_ROTATE_TICKS);
+            let content = match enabled[active_idx] {
+                WidgetKind::Docker => get_docker_status().map(WidgetContent::Docker),
+            };
+            WidgetPanelState { enabled, active_idx, content, ticks_remaining }
+        };
+        widget_tick = widget_tick.wrapping_add(1);
 
         let img = render(
             &font_bold,
@@ -635,11 +864,8 @@ fn main() -> Result<()> {
             nc_latency_ms,
             cpu_temp,
             &nc_url,
-            nc_active_5m,
-            nc_active_1h,
-            nc_active_24h,
-            nc_app_updates,
-            nc_core_update,
+            &info,
+            &widget,
             &config,
         );
 
