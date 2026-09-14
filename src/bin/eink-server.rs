@@ -50,14 +50,33 @@ struct Config {
 
 impl Config {
     fn load() -> Self {
-        if Path::new(CONFIG_PATH).exists() {
-            if let Ok(contents) = fs::read_to_string(CONFIG_PATH) {
-                if let Ok(config) = toml::from_str(&contents) {
-                    return config;
-                }
+        let mut config = if Path::new(CONFIG_PATH).exists() {
+            fs::read_to_string(CONFIG_PATH)
+                .ok()
+                .and_then(|contents| toml::from_str(&contents).ok())
+                .unwrap_or_default()
+        } else {
+            Config::default()
+        };
+        config.load_secrets_from_env();
+        config
+    }
+
+    /// Credentials are meant to live in the systemd unit's EnvironmentFile
+    /// (see secrets.env.example), not in server.toml — this only fills in
+    /// what TOML didn't already set, so an existing deployment with secrets
+    /// still in server.toml keeps working during migration.
+    fn load_secrets_from_env(&mut self) {
+        let fill = |field: &mut Option<String>, var: &str| {
+            if field.is_none() {
+                *field = std::env::var(var).ok();
             }
-        }
-        Config::default()
+        };
+        fill(&mut self.nextcloud_user, "NEXTCLOUD_USER");
+        fill(&mut self.nextcloud_password, "NEXTCLOUD_PASSWORD");
+        fill(&mut self.nextcloud_token, "NEXTCLOUD_TOKEN");
+        fill(&mut self.couchdb_user, "COUCHDB_USER");
+        fill(&mut self.couchdb_password, "COUCHDB_PASSWORD");
     }
 
     fn is_flipped(&self) -> bool {

@@ -5,6 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Optional (leading "-") — credentials live here, not in server.toml.
+# See secrets.env.example.
+EnvironmentFile=-/etc/thinkbook-eink/secrets.env
 ExecStart=/usr/local/bin/eink-server
 Restart=always
 RestartSec=10

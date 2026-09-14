@@ -1,5 +1,12 @@
 # thinkbook-eink configuration
 # Place this file at /etc/thinkbook-eink/server.toml
+#
+# Credentials (nextcloud_user/password/token, couchdb_user/password) are
+# better placed in /etc/thinkbook-eink/secrets.env instead — see
+# secrets.env.example. This file is readable by the plugdev group; that one
+# is root-only. Anything set here still works (and wins if set in both
+# places), so an existing setup with secrets already in this file doesn't
+# break — but new setups should use secrets.env.
 
 # ---------------------------------------------------------------------------
 # Display
@@ -38,12 +45,15 @@
 
 # Nextcloud admin credentials for version/latency checks.
 # Leave empty to skip (online/offline detection still works via status.php).
+# Prefer setting these in secrets.env instead (NEXTCLOUD_USER/_PASSWORD) —
+# shown here for reference only.
 #nextcloud_user = "admin"
 #nextcloud_password = "your-password-here"
 
 # Nextcloud app token (recommended over password).
 # Generate one in Nextcloud: Settings -> Security -> Devices & sessions.
 # When set, nextcloud_password is ignored. Requires nextcloud_user to be set.
+# Prefer NEXTCLOUD_TOKEN in secrets.env instead.
 #nextcloud_token = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 
 # Name of the Docker container running Nextcloud (e.g. "nextcloud-aio-nextcloud").
@@ -77,6 +87,8 @@
 #enabled_widgets = ["docker", "obsidian"]
 
 # CouchDB connection for the "obsidian" widget (no trailing slash).
+# Prefer COUCHDB_USER/COUCHDB_PASSWORD in secrets.env instead of the two
+# credential lines below — shown here for reference only.
 #couchdb_url = "https://obsidian-sync.example.com"
 #couchdb_user = "admin"
 #couchdb_password = "your-couchdb-password"
