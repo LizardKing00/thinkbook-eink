@@ -252,10 +252,25 @@ All tools read `/etc/thinkbook-eink/server.toml` at startup. All keys are option
 # leave unset and the panel shows "NO WIDGETS ENABLED" and nothing runs.
 #
 # Available widgets:
-#   "docker" - running/stopped container counts via `docker ps`. Requires
-#              the Docker CLI and permission to use it (the user running
-#              eink-server must be in the `docker` group, or equivalent).
-#enabled_widgets = ["docker"]
+#   "docker"   - running/stopped container counts via `docker ps`. Requires
+#                the Docker CLI and permission to use it (the user running
+#                eink-server must be in the `docker` group, or equivalent).
+#   "obsidian" - combined disk size / document counts for your Obsidian
+#                Self-hosted LiveSync vault database(s), queried directly
+#                from CouchDB. Warns once the combined size passes 2GB.
+#                Requires couchdb_url and couchdb_databases below.
+#enabled_widgets = ["docker", "obsidian"]
+
+# CouchDB connection for the "obsidian" widget — eink-server only (no
+# trailing slash on the URL).
+#couchdb_url = "https://obsidian-sync.example.com"
+#couchdb_user = "admin"
+#couchdb_password = "your-couchdb-password"
+# Database name(s) to report on — Self-hosted LiveSync names one database
+# per synced vault, so list every vault you want included. Run
+# `curl -u user:pass https://your-couchdb-url/_all_dbs` to see what exists
+# (ignore "_users" and "_replicator", those are CouchDB's own).
+#couchdb_databases = ["obsidian"]
 ```
 
 A commented-out example is included in `server.toml.example`.

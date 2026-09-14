@@ -42,6 +42,10 @@ struct Config {
     network_interface: Option<String>,
     enabled_widgets: Option<Vec<String>>,
     nextcloud_container: Option<String>,
+    couchdb_url: Option<String>,
+    couchdb_user: Option<String>,
+    couchdb_password: Option<String>,
+    couchdb_databases: Option<Vec<String>>,
 }
 
 impl Config {
@@ -75,12 +79,14 @@ impl Config {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum WidgetKind {
     Docker,
+    Obsidian,
 }
 
 impl WidgetKind {
     fn parse(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "docker" => Some(WidgetKind::Docker),
+            "obsidian" => Some(WidgetKind::Obsidian),
             _ => None,
         }
     }
@@ -88,6 +94,7 @@ impl WidgetKind {
     fn label(&self) -> &'static str {
         match self {
             WidgetKind::Docker => "DOCKER",
+            WidgetKind::Obsidian => "OBSIDIAN",
         }
     }
 }
@@ -148,8 +155,71 @@ fn format_stopped(names: &[String]) -> String {
     }
 }
 
+struct ObsidianStatus {
+    total_size: u64,
+    active_size: u64,
+    doc_count: u64,
+    doc_del_count: u64,
+    compacting: bool,
+}
+
+// Warn once the synced vault databases' combined on-disk size crosses this —
+// LiveSync keeps full revision history and this host has no compaction
+// schedule configured, so unbounded growth is a real, known risk here.
+const COUCHDB_SIZE_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+// Or once on-disk size dwarfs the actual live data — a better early signal
+// than the absolute threshold above, since it catches bloat regardless of
+// how big the vault itself is.
+const COUCHDB_BLOAT_RATIO_WARN: f64 = 3.0;
+
+/// Sums CouchDB's per-database stats (`GET /<db>`) across every database
+/// listed in `couchdb_databases` — Self-hosted LiveSync names its database
+/// per vault, so more than one can legitimately exist.
+fn get_obsidian_status(config: &Config) -> Option<ObsidianStatus> {
+    let base = config.couchdb_url.as_deref()?.trim_end_matches('/').to_string();
+    let dbs = config.couchdb_databases.as_ref()?;
+    if dbs.is_empty() {
+        return None;
+    }
+    let client = http_client()?;
+    let mut status = ObsidianStatus { total_size: 0, active_size: 0, doc_count: 0, doc_del_count: 0, compacting: false };
+    for db in dbs {
+        let mut req = client.get(format!("{}/{}", base, db));
+        if let Some(user) = config.couchdb_user.as_deref() {
+            req = req.basic_auth(user, config.couchdb_password.as_deref());
+        }
+        let json: serde_json::Value = req.send().ok()?.json().ok()?;
+        status.total_size += json["sizes"]["file"].as_u64().unwrap_or(0);
+        status.active_size += json["sizes"]["active"].as_u64().unwrap_or(0);
+        status.doc_count += json["doc_count"].as_u64().unwrap_or(0);
+        status.doc_del_count += json["doc_del_count"].as_u64().unwrap_or(0);
+        status.compacting = status.compacting || json["compact_running"].as_bool().unwrap_or(false);
+    }
+    Some(status)
+}
+
+impl ObsidianStatus {
+    /// How many times bigger the on-disk file is than the live data it
+    /// actually holds — old revisions and tombstones CouchDB hasn't
+    /// reclaimed yet. 1.0 means no bloat.
+    fn bloat_ratio(&self) -> f64 {
+        if self.active_size == 0 { return 1.0; }
+        self.total_size as f64 / self.active_size as f64
+    }
+
+    fn needs_compaction_warning(&self) -> bool {
+        // A freshly-synced, tiny database can have a huge bloat ratio just
+        // from initial setup churn — the ratio only means something once
+        // there's enough data for it to reflect real accumulated history.
+        const MIN_SIZE_FOR_RATIO_CHECK: u64 = 50 * 1024 * 1024;
+        self.total_size > COUCHDB_SIZE_WARN_BYTES
+            || (self.total_size > MIN_SIZE_FOR_RATIO_CHECK && self.bloat_ratio() > COUCHDB_BLOAT_RATIO_WARN)
+    }
+}
+
 enum WidgetContent {
     Docker(DockerStatus),
+    Obsidian(ObsidianStatus),
 }
 
 /// State for the lower-right rotating widget panel: which widgets are
@@ -281,6 +351,42 @@ fn corner_box(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, arm: i32, col
     vline(img, x + w, y + h - arm, y + h, color);
 }
 
+/// A small faceted-gem glyph (44x56px, evocative of "obsidian" the
+/// mineral) drawn as wireframe line segments, matching the dashboard's
+/// existing corner-bracket/line-art style. Original geometry, not a
+/// reproduction of any application's logo.
+fn draw_gem_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let (x, y) = (x as f32, y as f32);
+    let top = (x + 22.0, y);
+    let right = (x + 44.0, y + 20.0);
+    let bottom = (x + 22.0, y + 56.0);
+    let left = (x, y + 20.0);
+    draw_line_segment_mut(img, top, right, color);
+    draw_line_segment_mut(img, right, bottom, color);
+    draw_line_segment_mut(img, bottom, left, color);
+    draw_line_segment_mut(img, left, top, color);
+    draw_line_segment_mut(img, left, right, color);
+    draw_line_segment_mut(img, top, bottom, color);
+}
+
+/// A warning-triangle glyph (26x24px: outline + exclamation mark) drawn as
+/// vector line art rather than the Unicode ⚠ character — this font can't
+/// render that glyph at all (same tofu-box issue as the rotation dots and
+/// the TIME -> arrow before it), but plain line segments sidestep the
+/// problem entirely.
+fn draw_warn_triangle(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let (w, h) = (26.0, 24.0);
+    let (xf, yf) = (x as f32, y as f32);
+    let apex = (xf + w / 2.0, yf);
+    let bottom_right = (xf + w, yf + h);
+    let bottom_left = (xf, yf + h);
+    draw_line_segment_mut(img, apex, bottom_right, color);
+    draw_line_segment_mut(img, bottom_right, bottom_left, color);
+    draw_line_segment_mut(img, bottom_left, apex, color);
+    draw_line_segment_mut(img, (xf + w / 2.0, yf + h * 0.32), (xf + w / 2.0, yf + h * 0.62), color);
+    draw_filled_rect_mut(img, Rect::at((xf + w / 2.0 - 1.0) as i32, (yf + h * 0.74) as i32).of_size(2, 2), color);
+}
+
 fn dashed_hline(img: &mut GrayImage, x1: i32, x2: i32, y: i32, color: Luma<u8>) {
     let mut x = x1;
     while x < x2 {
@@ -370,6 +476,18 @@ fn format_uptime(secs: u64) -> String {
     else { format!("{}M", mins) }
 }
 
+/// Shared blocking HTTP client builder — every widget/status check that
+/// talks HTTP (Nextcloud, CouchDB, ...) uses the same short timeout and
+/// accepts self-signed certs, since these are all local/home-server
+/// endpoints.
+fn http_client() -> Option<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()
+}
+
 // ---------------------------------------------------------------------------
 // Nextcloud
 // ---------------------------------------------------------------------------
@@ -397,12 +515,9 @@ fn apply_nc_auth(req: reqwest::blocking::RequestBuilder, config: &Config) -> req
 
 fn check_nextcloud(config: &Config) -> (bool, String, u32, String) {
     let base = nc_base_url(config);
-    let client = match reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(5))
-        .build() {
-        Ok(c) => c,
-        Err(_) => return (false, String::new(), 0, base),
+    let client = match http_client() {
+        Some(c) => c,
+        None => return (false, String::new(), 0, base),
     };
     let start = std::time::Instant::now();
     let req = client.get(format!("{}/status.php", base));
@@ -466,12 +581,9 @@ fn fetch_serverinfo(config: &Config) -> ServerInfo {
     if !has_token && !has_basic {
         return defaults;
     }
-    let client = match reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(5))
-        .build() {
-        Ok(c) => c,
-        Err(_) => return defaults,
+    let client = match http_client() {
+        Some(c) => c,
+        None => return defaults,
     };
     let url = format!("{}/ocs/v2.php/apps/serverinfo/api/v1/info?format=json", base);
     eprintln!("[serverinfo] fetching {}", url);
@@ -635,11 +747,13 @@ fn render(
     };
     txt(&mut img, fr, &users_label, MARGIN, 152, 26.0, p.mid);
     if info.app_updates > 0 {
-        let alert = format!("\u{26A0} {} APP UPDATES PENDING", info.app_updates);
-        txt(&mut img, fb, &alert, 560, 150, 26.0, p.bright);
+        draw_warn_triangle(&mut img, 560, 150, p.bright);
+        let alert = format!("{} APP UPDATES PENDING", info.app_updates);
+        txt(&mut img, fb, &alert, 560 + 34, 150, 26.0, p.bright);
     }
     if info.core_update {
-        txt(&mut img, fb, "\u{26A0} CORE UPDATE PENDING", 1060, 150, 26.0, p.bright);
+        draw_warn_triangle(&mut img, 1060, 150, p.bright);
+        txt(&mut img, fb, "CORE UPDATE PENDING", 1060 + 34, 150, 26.0, p.bright);
     }
     hline(&mut img, MARGIN, W as i32 - MARGIN, 182, p.dim);
 
@@ -727,17 +841,22 @@ fn render(
     txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
     txt_c(&mut img, fr, "RX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, p.dim);
 
+    // Divider between the graphs row and the panel row below.
+    dashed_hline(&mut img, MARGIN, W as i32 - MARGIN, r2y + 38 + graph_h + 56, p.dim);
+
     // Row 3: static Nextcloud detail panel (left) + rotating widget panel (right).
     // Left is narrower since the Nextcloud URL/config lines sit below it;
     // right extends further down to use that same space, since it has
-    // nothing below it.
-    let r3y = r2y + 38 + graph_h + 54;
+    // nothing below it. Heights are 12px shorter than before to make room
+    // for the new divider above while keeping both panels' bottom edges
+    // (and their clearance from the URL summary / footer) unchanged.
+    let r3y = r2y + 38 + graph_h + 66;
     let left_w = 620;
-    let left_h = 252;
+    let left_h = 240;
     let gap = 40;
     let right_x = MARGIN + left_w + gap;
     let right_w = (W as i32 - MARGIN) - right_x;
-    let right_h = 310;
+    let right_h = 298;
 
     // Left: Nextcloud detail (static, always on when Nextcloud is configured).
     // Every line goes through txt_clip so variable-length upstream data
@@ -788,6 +907,22 @@ fn render(
                 txt_c(&mut img, fb, &format!("{} CONTAINERS RUNNING", status.running), cx, r3y + 100, 56.0, p.bright);
                 let stopped_color = if status.stopped.is_empty() { p.mid } else { p.bright };
                 txt_clip(&mut img, fr, &format_stopped(&status.stopped), right_x + 10, r3y + 190, 26.0, right_w - 20, stopped_color);
+            }
+            Some(WidgetContent::Obsidian(status)) => {
+                draw_gem_icon(&mut img, right_x + 20, r3y + 40, p.mid);
+                txt_c(&mut img, fb, &format!("DB SIZE: {}", format_bytes(status.total_size)), cx, r3y + 100, 56.0, p.bright);
+                let detail = format!(
+                    "{} DOCS ({} DEL) - {} LIVE ({:.1}X)",
+                    status.doc_count, status.doc_del_count,
+                    format_bytes(status.active_size), status.bloat_ratio(),
+                );
+                let detail = clip_text(fr, &detail, 24.0, right_w - 20);
+                txt_c(&mut img, fr, &detail, cx, r3y + 190, 24.0, p.mid);
+                if status.compacting {
+                    txt_c(&mut img, fr, "COMPACTING...", cx, r3y + 232, 24.0, p.mid);
+                } else if status.needs_compaction_warning() {
+                    txt_c(&mut img, fr, "COMPACT RECOMMENDED", cx, r3y + 232, 24.0, p.bright);
+                }
             }
             None => {
                 txt_c(&mut img, fr, &format!("{}: UNAVAILABLE", widget.enabled[widget.active_idx].label()), cx, r3y + right_h / 2, 26.0, p.dim);
@@ -943,6 +1078,7 @@ fn main() -> Result<()> {
             let ticks_remaining = WIDGET_ROTATE_TICKS - (widget_tick % WIDGET_ROTATE_TICKS);
             let content = match enabled[active_idx] {
                 WidgetKind::Docker => get_docker_status().map(WidgetContent::Docker),
+                WidgetKind::Obsidian => get_obsidian_status(&config).map(WidgetContent::Obsidian),
             };
             WidgetPanelState { enabled, active_idx, content, ticks_remaining }
         };
