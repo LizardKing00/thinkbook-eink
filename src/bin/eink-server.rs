@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use anyhow::Result;
-use chrono::{Local, Timelike};
+use chrono::{Datelike, Local, NaiveDate, Timelike};
 use image::{DynamicImage, GrayImage, Luma, imageops};
-use imageproc::drawing::{draw_filled_rect_mut, draw_line_segment_mut, draw_text_mut, text_size};
+use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_circle_mut, draw_line_segment_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect;
 use rusttype::{Font, Scale};
 use std::collections::VecDeque;
@@ -48,6 +48,9 @@ struct Config {
     couchdb_databases: Option<Vec<String>>,
     firefly_url: Option<String>,
     firefly_token: Option<String>,
+    gramps_url: Option<String>,
+    gramps_user: Option<String>,
+    gramps_password: Option<String>,
 }
 
 impl Config {
@@ -93,6 +96,8 @@ impl Config {
         fill(&mut self.couchdb_user, "COUCHDB_USER");
         fill(&mut self.couchdb_password, "COUCHDB_PASSWORD");
         fill(&mut self.firefly_token, "FIREFLY_TOKEN");
+        fill(&mut self.gramps_user, "GRAMPS_USER");
+        fill(&mut self.gramps_password, "GRAMPS_PASSWORD");
     }
 
     fn is_flipped(&self) -> bool {
@@ -116,6 +121,7 @@ enum WidgetKind {
     Docker,
     Obsidian,
     Firefly,
+    Gramps,
 }
 
 impl WidgetKind {
@@ -124,6 +130,7 @@ impl WidgetKind {
             "docker" => Some(WidgetKind::Docker),
             "obsidian" => Some(WidgetKind::Obsidian),
             "firefly" => Some(WidgetKind::Firefly),
+            "gramps" => Some(WidgetKind::Gramps),
             _ => None,
         }
     }
@@ -133,6 +140,7 @@ impl WidgetKind {
             WidgetKind::Docker => "DOCKER",
             WidgetKind::Obsidian => "OBSIDIAN",
             WidgetKind::Firefly => "FIREFLY",
+            WidgetKind::Gramps => "GRAMPS",
         }
     }
 }
@@ -288,10 +296,116 @@ fn get_firefly_status(config: &Config) -> Option<FireflyStatus> {
     Some(FireflyStatus { bills_paid, bills_unpaid, currency_symbol })
 }
 
+struct GrampsStatus {
+    name: String,
+    days_until: i64,
+}
+
+/// Finds the person a birth event belongs to by scanning everyone's
+/// event_ref_list for a reference to it (Gramps only stores the person ->
+/// event link, not the reverse), and skips anyone with a recorded death as
+/// a simple (imperfect) proxy for "living". Returns their display name.
+fn gramps_living_person_for_birth_event(people: &[serde_json::Value], event_handle: &str) -> Option<String> {
+    for p in people {
+        let Some(refs) = p["event_ref_list"].as_array() else { continue };
+        if !refs.iter().any(|r| r["ref"].as_str() == Some(event_handle)) {
+            continue;
+        }
+        if p["death_ref_index"].as_i64().unwrap_or(-1) >= 0 {
+            return None;
+        }
+        let first = p["primary_name"]["first_name"].as_str().unwrap_or("");
+        let surname = p["primary_name"]["surname_list"][0]["surname"].as_str().unwrap_or("");
+        let name = format!("{} {}", first, surname).trim().to_string();
+        return Some(if name.is_empty() { "SOMEONE".to_string() } else { name });
+    }
+    None
+}
+
+/// Finds the nearest upcoming birthday among living people in a Gramps Web
+/// tree.
+///
+/// UNVERIFIED: written without a test Gramps Web account available, so the
+/// exact response shape below is a best-effort guess based on Gramps' core
+/// data model (person.primary_name, person.event_ref_list, event.date.dateval
+/// — the same field names Gramps' Python object model and XML export use,
+/// which the Web API is a fairly direct serialization of), not a live-
+/// verified schema like the other three widgets. If wrong, this just
+/// returns None and the widget shows "GRAMPS: UNAVAILABLE" rather than bad
+/// data — confirm against a real /api/events/ + /api/people/ response once
+/// credentials are available, and fix the field paths here if they differ.
+fn get_gramps_status(config: &Config) -> Option<GrampsStatus> {
+    let base = config.gramps_url.as_deref()?.trim_end_matches('/').to_string();
+    let user = config.gramps_user.as_deref()?;
+    let pass = config.gramps_password.as_deref()?;
+    let client = http_client()?;
+
+    // Log in fresh each poll rather than caching — Gramps Web JWTs are
+    // short-lived, and this only runs every few minutes anyway.
+    let login: serde_json::Value = client.post(format!("{}/api/token/", base))
+        .json(&serde_json::json!({"username": user, "password": pass}))
+        .send().ok()?.json().ok()?;
+    let token = login["access_token"].as_str()?;
+
+    let events: Vec<serde_json::Value> = client.get(format!("{}/api/events/", base))
+        .bearer_auth(token).send().ok()?.json().ok()?;
+    let people: Vec<serde_json::Value> = client.get(format!("{}/api/people/", base))
+        .bearer_auth(token).send().ok()?.json().ok()?;
+
+    let today = Local::now().date_naive();
+    let mut nearest: Option<(i64, String)> = None;
+
+    for event in &events {
+        let type_str = event["type"]["string"].as_str().or_else(|| event["type"].as_str()).unwrap_or("");
+        if type_str != "Birth" {
+            continue;
+        }
+        let Some(dateval) = event["date"]["dateval"].as_array() else { continue };
+        if dateval.len() < 3 {
+            continue;
+        }
+        let (Some(day), Some(month)) = (dateval[0].as_i64(), dateval[1].as_i64()) else { continue };
+        if day == 0 || month == 0 {
+            continue; // incomplete date (year-only, etc.)
+        }
+        let Some(event_handle) = event["handle"].as_str() else { continue };
+        let Some(name) = gramps_living_person_for_birth_event(&people, event_handle) else { continue };
+
+        let mut next = NaiveDate::from_ymd_opt(today.year(), month as u32, day as u32);
+        if let Some(d) = next {
+            if d < today {
+                next = NaiveDate::from_ymd_opt(today.year() + 1, month as u32, day as u32);
+            }
+        }
+        let Some(next) = next else { continue }; // e.g. Feb 29 on a non-leap year
+        let days_until = (next - today).num_days();
+
+        if nearest.as_ref().map(|(d, _)| days_until < *d).unwrap_or(true) {
+            nearest = Some((days_until, name));
+        }
+    }
+
+    nearest.map(|(days_until, name)| GrampsStatus { name, days_until })
+}
+
+/// A small family-tree glyph (three nodes, wireframe) drawn as vector line
+/// art matching the dashboard's other icons.
+fn draw_tree_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let root = (x + 20, y + 8);
+    let left = (x + 6, y + 48);
+    let right = (x + 34, y + 48);
+    draw_line_segment_mut(img, (root.0 as f32, root.1 as f32), (left.0 as f32, left.1 as f32), color);
+    draw_line_segment_mut(img, (root.0 as f32, root.1 as f32), (right.0 as f32, right.1 as f32), color);
+    draw_hollow_circle_mut(img, root, 8, color);
+    draw_hollow_circle_mut(img, left, 8, color);
+    draw_hollow_circle_mut(img, right, 8, color);
+}
+
 enum WidgetContent {
     Docker(DockerStatus),
     Obsidian(ObsidianStatus),
     Firefly(FireflyStatus),
+    Gramps(GrampsStatus),
 }
 
 /// State for the lower-right rotating widget panel: which widgets are
@@ -1026,6 +1140,13 @@ fn render(
                 let paid = clip_text(fr, &paid, 24.0, right_w - 20);
                 txt_c(&mut img, fr, &paid, cx, r3y + 190, 24.0, p.mid);
             }
+            Some(WidgetContent::Gramps(status)) => {
+                draw_tree_icon(&mut img, right_x + 20, r3y + 40, p.mid);
+                let days_line = if status.days_until == 0 { "TODAY!".to_string() } else { format!("{} DAYS", status.days_until) };
+                txt_c(&mut img, fb, &days_line, cx, r3y + 100, 56.0, p.bright);
+                let name_line = clip_text(fr, &format!("{}'S BIRTHDAY", status.name.to_uppercase()), 24.0, right_w - 20);
+                txt_c(&mut img, fr, &name_line, cx, r3y + 190, 24.0, p.mid);
+            }
             None => {
                 txt_c(&mut img, fr, &format!("{}: UNAVAILABLE", widget.enabled[widget.active_idx].label()), cx, r3y + right_h / 2, 26.0, p.dim);
             }
@@ -1182,7 +1303,15 @@ fn main() -> Result<()> {
                 WidgetKind::Docker => get_docker_status().map(WidgetContent::Docker),
                 WidgetKind::Obsidian => get_obsidian_status(&config).map(WidgetContent::Obsidian),
                 WidgetKind::Firefly => get_firefly_status(&config).map(WidgetContent::Firefly),
+                WidgetKind::Gramps => get_gramps_status(&config).map(WidgetContent::Gramps),
             };
+            if content.is_none() {
+                // Not logging *why* — the fetch functions don't surface a
+                // reason, only None — but even knowing which widget failed
+                // and when beats the silent "UNAVAILABLE" on the panel with
+                // nothing in the logs to go on.
+                eprintln!("[widget] {} fetch returned no data — check its config/credentials/connectivity", enabled[active_idx].label());
+            }
             WidgetPanelState { enabled, active_idx, content, ticks_remaining }
         };
         widget_tick = widget_tick.wrapping_add(1);

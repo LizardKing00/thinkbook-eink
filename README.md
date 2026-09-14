@@ -267,7 +267,11 @@ That's the recommended place for them; server.toml is readable by the
 #   "firefly"  - bills paid/unpaid this calendar month from Firefly III's
 #                summary API. Requires firefly_url and a Personal Access
 #                Token below.
-#enabled_widgets = ["docker", "obsidian", "firefly"]
+#   "gramps"   - nearest upcoming birthday among living people in a Gramps
+#                Web family tree. Requires gramps_url and a login below.
+#                UNVERIFIED — see the note under Configuration below before
+#                relying on it.
+#enabled_widgets = ["docker", "obsidian", "firefly", "gramps"]
 
 # CouchDB connection for the "obsidian" widget — eink-server only (no
 # trailing slash on the URL).
@@ -285,9 +289,24 @@ That's the recommended place for them; server.toml is readable by the
 # Options -> Profile -> OAuth -> Personal Access Tokens.
 #firefly_url = "https://firefly.example.com"
 #firefly_token = "your-personal-access-token"
+
+# Gramps Web connection for the "gramps" widget — eink-server only (no
+# trailing slash on the URL).
+#gramps_url = "https://gramps.example.com"
+#gramps_user = "admin"
+#gramps_password = "your-gramps-password"
 ```
 
 A commented-out example is included in `server.toml.example`.
+
+**A note on the "gramps" widget**: it was implemented without a test Gramps
+Web account available, so the API response parsing (birth event dates,
+linking events to people) is a best-effort guess based on Gramps' core data
+model rather than a field-by-field verified schema like the other three
+widgets. It's written to fail safe — a wrong guess just means the panel
+shows "GRAMPS: UNAVAILABLE", not bad data — but confirm it actually returns
+a real birthday once you have Gramps Web credentials, and check the comment
+above `get_gramps_status` in `src/bin/eink-server.rs` if it needs fixing.
 
 ### Secrets
 
@@ -312,6 +331,8 @@ NEXTCLOUD_TOKEN=...
 COUCHDB_USER=admin
 COUCHDB_PASSWORD=...
 FIREFLY_TOKEN=...
+GRAMPS_USER=admin
+GRAMPS_PASSWORD=...
 ```
 
 Anything set in `server.toml`'s `nextcloud_user`/`nextcloud_password`/

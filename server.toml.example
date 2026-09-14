@@ -88,7 +88,15 @@
 #                summary API. Requires firefly_url and a Personal Access
 #                Token (Options -> Profile -> OAuth -> Personal Access
 #                Tokens in Firefly's UI) below.
-#enabled_widgets = ["docker", "obsidian", "firefly"]
+#   "gramps"   - nearest upcoming birthday among living people in a Gramps
+#                Web family tree. Requires gramps_url and a login below.
+#                UNVERIFIED: implemented without a test Gramps Web account
+#                available, so the API response parsing is a best-effort
+#                guess (see the comment above get_gramps_status in
+#                src/bin/eink-server.rs) — it fails safe to "UNAVAILABLE"
+#                rather than showing wrong data if the guess is off, but
+#                confirm it actually works before relying on it.
+#enabled_widgets = ["docker", "obsidian", "firefly", "gramps"]
 
 # CouchDB connection for the "obsidian" widget (no trailing slash).
 # Prefer COUCHDB_USER/COUCHDB_PASSWORD in secrets.env instead of the two
@@ -106,3 +114,10 @@
 # Prefer FIREFLY_TOKEN in secrets.env instead of the line below.
 #firefly_url = "https://firefly.example.com"
 #firefly_token = "your-personal-access-token"
+
+# Gramps Web connection for the "gramps" widget (no trailing slash).
+# Prefer GRAMPS_USER/GRAMPS_PASSWORD in secrets.env instead of the two
+# credential lines below — shown here for reference only.
+#gramps_url = "https://gramps.example.com"
+#gramps_user = "admin"
+#gramps_password = "your-gramps-password"
