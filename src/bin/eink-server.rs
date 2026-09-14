@@ -39,6 +39,7 @@ struct Config {
     nextcloud_user: Option<String>,
     nextcloud_password: Option<String>,
     nextcloud_token: Option<String>,
+    network_interface: Option<String>,
 }
 
 impl Config {
@@ -162,9 +163,8 @@ fn dashed_hline(img: &mut GrayImage, x1: i32, x2: i32, y: i32, color: Luma<u8>) 
     }
 }
 
-fn draw_graph(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, values: &VecDeque<f64>, p: &Palette) {
+fn draw_graph(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, values: &VecDeque<f64>, max_val: f64, p: &Palette) {
     if values.len() < 2 { return; }
-    let max_val = values.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
     let n = values.len();
     let points: Vec<(f32, f32)> = values.iter().enumerate().map(|(i, &v)| {
         let px = x as f32 + (i as f32 / (n - 1).max(1) as f32) * w as f32;
@@ -486,12 +486,18 @@ fn render(
     let graph_w = (W as i32 - 2 * MARGIN - 60) / 2;
     let graph_h = 180;
 
+    // Shared y-axis scale so the two graphs are directly comparable — a real
+    // magnitude difference shows as different curve heights, not just in
+    // the small TX:/RX: text labels.
+    let net_max = upload_history.iter().chain(download_history.iter())
+        .cloned().fold(0.0_f64, f64::max).max(1.0);
+
     let bx = MARGIN;
     txt(&mut img, fb, "// UPLOAD", bx, r2y, 30.0, p.mid);
     let cur_up = upload_history.back().cloned().unwrap_or(0.0);
     txt_r(&mut img, fb, &format!("TX: {}", format_speed(cur_up)), bx + graph_w, r2y + 2, 28.0, p.bright);
     corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, p.dim);
-    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, upload_history, &p);
+    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, upload_history, net_max, &p);
     txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, p.dim);
     txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
     txt_c(&mut img, fr, "TX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, p.dim);
@@ -501,7 +507,7 @@ fn render(
     let cur_down = download_history.back().cloned().unwrap_or(0.0);
     txt_r(&mut img, fb, &format!("RX: {}", format_speed(cur_down)), bx + graph_w, r2y + 2, 28.0, p.bright);
     corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, p.dim);
-    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, download_history, &p);
+    draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, download_history, net_max, &p);
     txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, p.dim);
     txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
     txt_c(&mut img, fr, "RX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, p.dim);
@@ -529,12 +535,29 @@ fn render(
 // System helpers
 // ---------------------------------------------------------------------------
 
-fn get_network_speeds(_sys: &System, prev_rx: u64, prev_tx: u64, elapsed_secs: f64) -> (f64, f64, u64, u64) {
+// Interfaces that never carry real uplink traffic: loopback and the virtual
+// bridge/veth pairs Docker creates per-container. Their traffic is symmetric
+// by construction (what leaves a container's eth0 enters its veth peer), so
+// summing them alongside the real NIC drowns real up/down asymmetry and
+// makes the two graphs look identical.
+const VIRTUAL_IFACE_PREFIXES: &[&str] = &["lo", "docker", "veth", "br-", "virbr", "tun", "tap"];
+
+fn get_network_speeds(
+    _sys: &System,
+    prev_rx: u64,
+    prev_tx: u64,
+    elapsed_secs: f64,
+    iface_filter: Option<&str>,
+) -> (f64, f64, u64, u64) {
     let mut total_rx: u64 = 0;
     let mut total_tx: u64 = 0;
     let networks = Networks::new_with_refreshed_list();
     for (name, data) in &networks {
-        if name == "lo" { continue; }
+        let include = match iface_filter {
+            Some(wanted) => name == wanted,
+            None => !VIRTUAL_IFACE_PREFIXES.iter().any(|p| name.starts_with(p)),
+        };
+        if !include { continue; }
         total_rx += data.total_received();
         total_tx += data.total_transmitted();
     }
@@ -588,7 +611,7 @@ fn main() -> Result<()> {
         let elapsed = last_tick.elapsed().as_secs_f64().max(1.0);
         last_tick = std::time::Instant::now();
         let (rx_speed, tx_speed, total_rx, total_tx) =
-            get_network_speeds(&sys, prev_rx, prev_tx, elapsed);
+            get_network_speeds(&sys, prev_rx, prev_tx, elapsed, config.network_interface.as_deref());
         prev_rx = total_rx;
         prev_tx = total_tx;
         if upload_history.len() == 60 { upload_history.pop_front(); }

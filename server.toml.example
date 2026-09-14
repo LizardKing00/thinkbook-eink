@@ -16,6 +16,20 @@
 #theme = "light"
 
 # ---------------------------------------------------------------------------
+# Networking (eink-server only)
+# ---------------------------------------------------------------------------
+
+# Name of the network interface to measure for the upload/download graphs
+# (e.g. "eth0", "wlp0s20f3"). By default, eink-server auto-excludes loopback
+# and virtual interfaces (docker*, veth*, br-*, virbr*, tun*, tap*) and sums
+# whatever real interfaces remain. Set this if you run Docker (bridge/veth
+# traffic is symmetric and can otherwise still skew the graphs) and want to
+# pin exactly one physical uplink, or if the auto-detection picks up the
+# wrong interface on your system. Run `ip -o link show` to list interface
+# names.
+#network_interface = "wlp0s20f3"
+
+# ---------------------------------------------------------------------------
 # Nextcloud (eink-server only)
 # ---------------------------------------------------------------------------
 
