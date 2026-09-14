@@ -2,7 +2,7 @@ use serde::Deserialize;
 use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use image::{DynamicImage, GrayImage, Luma, imageops};
-use imageproc::drawing::{draw_filled_rect_mut, draw_hollow_circle_mut, draw_line_segment_mut, draw_text_mut, text_size};
+use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut, draw_hollow_circle_mut, draw_line_segment_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect;
 use rusttype::{Font, Scale};
 use std::collections::VecDeque;
@@ -388,17 +388,93 @@ fn get_gramps_status(config: &Config) -> Option<GrampsStatus> {
     nearest.map(|(days_until, name)| GrampsStatus { name, days_until })
 }
 
-/// A small family-tree glyph (three nodes, wireframe) drawn as vector line
-/// art matching the dashboard's other icons.
-fn draw_tree_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
-    let root = (x + 20, y + 8);
-    let left = (x + 6, y + 48);
-    let right = (x + 34, y + 48);
-    draw_line_segment_mut(img, (root.0 as f32, root.1 as f32), (left.0 as f32, left.1 as f32), color);
-    draw_line_segment_mut(img, (root.0 as f32, root.1 as f32), (right.0 as f32, right.1 as f32), color);
-    draw_hollow_circle_mut(img, root, 8, color);
-    draw_hollow_circle_mut(img, left, 8, color);
-    draw_hollow_circle_mut(img, right, 8, color);
+// ---------------------------------------------------------------------------
+// Widget icons — all built from a 0-60 local coordinate box (helper `o()`
+// below offsets into panel space), using only straight line segments and
+// circles per the drawing primitives actually available. Closed outlines
+// ("rings") are drawn as segments, not draw_polygon_mut, since these are
+// meant to read as hollow wireframes, not filled silhouettes.
+// ---------------------------------------------------------------------------
+
+/// Draws a closed polyline: consecutive points plus a segment from the
+/// last point back to the first.
+fn draw_ring(img: &mut GrayImage, points: &[(f32, f32)], color: Luma<u8>) {
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) % points.len()];
+        draw_line_segment_mut(img, a, b, color);
+    }
+}
+
+/// Draws an open polyline: consecutive points only, no closing segment.
+fn draw_open(img: &mut GrayImage, points: &[(f32, f32)], color: Luma<u8>) {
+    for pair in points.windows(2) {
+        draw_line_segment_mut(img, pair[0], pair[1], color);
+    }
+}
+
+/// Docker: whale silhouette (12-point body ring, mouth line, fin, filled
+/// eye). Original geometry — evocative of Docker's whale motif, not a
+/// reproduction of the trademarked logo.
+fn draw_docker_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let o = |lx: f32, ly: f32| (x as f32 + lx, y as f32 + ly);
+    draw_ring(img, &[
+        o(4.0, 24.0), o(20.0, 19.0), o(34.0, 21.0), o(46.0, 22.0),
+        o(59.0, 14.0), o(50.0, 24.0), o(56.0, 31.0), o(45.0, 29.0),
+        o(32.0, 37.0), o(20.0, 41.0), o(10.0, 39.0), o(4.0, 34.0),
+    ], color);
+    draw_line_segment_mut(img, o(4.0, 33.0), o(22.0, 34.0), color);
+    draw_ring(img, &[o(24.0, 39.0), o(33.0, 36.0), o(28.0, 46.0)], color);
+    draw_filled_circle_mut(img, (x + 8, y + 28), 1, color);
+}
+
+/// Obsidian: a single faceted crystal shard (crown + ridge + facet lines)
+/// with a small broken-off satellite shard.
+fn draw_obsidian_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let o = |lx: f32, ly: f32| (x as f32 + lx, y as f32 + ly);
+    draw_ring(img, &[o(27.0, 3.0), o(45.0, 24.0), o(41.0, 52.0), o(28.0, 58.0), o(15.0, 48.0), o(13.0, 20.0)], color);
+    draw_open(img, &[o(13.0, 20.0), o(27.0, 15.0), o(45.0, 24.0)], color);
+    draw_line_segment_mut(img, o(27.0, 3.0), o(27.0, 15.0), color);
+    draw_line_segment_mut(img, o(27.0, 15.0), o(28.0, 58.0), color);
+    draw_ring(img, &[o(46.0, 36.0), o(56.0, 45.0), o(48.0, 52.0)], color);
+}
+
+/// Gramps: tree canopy (13-point lumpy-foliage ring) on three branch lines,
+/// above a trunk drawn as a DNA double helix (two interleaved strands with
+/// rungs where they're furthest apart).
+fn draw_gramps_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let o = |lx: f32, ly: f32| (x as f32 + lx, y as f32 + ly);
+    draw_ring(img, &[
+        o(30.0, 4.0), o(40.0, 7.0), o(42.0, 13.0), o(52.0, 16.0),
+        o(54.0, 24.0), o(44.0, 28.0), o(36.0, 31.0), o(30.0, 33.0),
+        o(23.0, 31.0), o(15.0, 28.0), o(6.0, 23.0), o(15.0, 15.0),
+        o(20.0, 8.0),
+    ], color);
+    draw_line_segment_mut(img, o(30.0, 33.0), o(30.0, 21.0), color);
+    draw_line_segment_mut(img, o(30.0, 27.0), o(20.0, 18.0), color);
+    draw_line_segment_mut(img, o(30.0, 25.0), o(40.0, 17.0), color);
+    draw_open(img, &[o(25.0, 33.0), o(35.0, 40.0), o(25.0, 47.0), o(33.0, 56.0)], color);
+    draw_open(img, &[o(35.0, 33.0), o(25.0, 40.0), o(35.0, 47.0), o(27.0, 56.0)], color);
+    draw_line_segment_mut(img, o(25.0, 40.0), o(35.0, 40.0), color);
+    draw_line_segment_mut(img, o(25.0, 47.0), o(35.0, 47.0), color);
+}
+
+/// Firefly: top-down beetle (swept wings, segmented body, hollow head with
+/// antennae) with a filled "lantern" and three radiating spark lines —
+/// the glow is what distinguishes it from a generic bug.
+fn draw_firefly_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let o = |lx: f32, ly: f32| (x as f32 + lx, y as f32 + ly);
+    draw_ring(img, &[o(25.0, 16.0), o(8.0, 22.0), o(6.0, 34.0), o(24.0, 30.0)], color);
+    draw_ring(img, &[o(35.0, 16.0), o(52.0, 22.0), o(54.0, 34.0), o(36.0, 30.0)], color);
+    draw_ring(img, &[o(26.0, 14.0), o(34.0, 14.0), o(35.0, 22.0), o(34.0, 36.0), o(30.0, 42.0), o(26.0, 36.0), o(25.0, 22.0)], color);
+    draw_line_segment_mut(img, o(25.0, 22.0), o(35.0, 22.0), color);
+    draw_hollow_circle_mut(img, (x + 30, y + 9), 4, color);
+    draw_line_segment_mut(img, o(27.0, 6.0), o(22.0, 2.0), color);
+    draw_line_segment_mut(img, o(33.0, 6.0), o(38.0, 2.0), color);
+    draw_filled_circle_mut(img, (x + 30, y + 45), 3, color);
+    draw_line_segment_mut(img, o(30.0, 49.0), o(30.0, 55.0), color);
+    draw_line_segment_mut(img, o(25.0, 47.0), o(21.0, 52.0), color);
+    draw_line_segment_mut(img, o(35.0, 47.0), o(39.0, 52.0), color);
 }
 
 enum WidgetContent {
@@ -537,24 +613,6 @@ fn corner_box(img: &mut GrayImage, x: i32, y: i32, w: i32, h: i32, arm: i32, col
     vline(img, x + w, y + h - arm, y + h, color);
 }
 
-/// A small faceted-gem glyph (44x56px, evocative of "obsidian" the
-/// mineral) drawn as wireframe line segments, matching the dashboard's
-/// existing corner-bracket/line-art style. Original geometry, not a
-/// reproduction of any application's logo.
-fn draw_gem_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
-    let (x, y) = (x as f32, y as f32);
-    let top = (x + 22.0, y);
-    let right = (x + 44.0, y + 20.0);
-    let bottom = (x + 22.0, y + 56.0);
-    let left = (x, y + 20.0);
-    draw_line_segment_mut(img, top, right, color);
-    draw_line_segment_mut(img, right, bottom, color);
-    draw_line_segment_mut(img, bottom, left, color);
-    draw_line_segment_mut(img, left, top, color);
-    draw_line_segment_mut(img, left, right, color);
-    draw_line_segment_mut(img, top, bottom, color);
-}
-
 /// A warning-triangle glyph (26x24px: outline + exclamation mark) drawn as
 /// vector line art rather than the Unicode ⚠ character — this font can't
 /// render that glyph at all (same tofu-box issue as the rotation dots and
@@ -571,27 +629,6 @@ fn draw_warn_triangle(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
     draw_line_segment_mut(img, bottom_left, apex, color);
     draw_line_segment_mut(img, (xf + w / 2.0, yf + h * 0.32), (xf + w / 2.0, yf + h * 0.62), color);
     draw_filled_rect_mut(img, Rect::at((xf + w / 2.0 - 1.0) as i32, (yf + h * 0.74) as i32).of_size(2, 2), color);
-}
-
-/// A small receipt/bill glyph (40x58px: torn-edge rectangle with a few
-/// line-item marks inside), wireframe line art matching the dashboard's
-/// existing icon style — original geometry, not any app's logo.
-fn draw_receipt_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
-    let (xf, yf) = (x as f32, y as f32);
-    draw_line_segment_mut(img, (xf, yf), (xf + 40.0, yf), color);
-    draw_line_segment_mut(img, (xf, yf), (xf, yf + 48.0), color);
-    draw_line_segment_mut(img, (xf + 40.0, yf), (xf + 40.0, yf + 48.0), color);
-    let zigzag = [
-        (xf, yf + 48.0), (xf + 10.0, yf + 58.0), (xf + 20.0, yf + 48.0),
-        (xf + 30.0, yf + 58.0), (xf + 40.0, yf + 48.0),
-    ];
-    for pair in zigzag.windows(2) {
-        draw_line_segment_mut(img, pair[0], pair[1], color);
-    }
-    for i in 0..3 {
-        let ly = yf + 14.0 + i as f32 * 10.0;
-        draw_line_segment_mut(img, (xf + 8.0, ly), (xf + 32.0, ly), color);
-    }
 }
 
 fn dashed_hline(img: &mut GrayImage, x1: i32, x2: i32, y: i32, color: Luma<u8>) {
@@ -1111,12 +1148,13 @@ fn render(
         let cx = right_x + right_w / 2;
         match &widget.content {
             Some(WidgetContent::Docker(status)) => {
+                draw_docker_icon(&mut img, right_x + 20, r3y + 40, p.mid);
                 txt_c(&mut img, fb, &format!("{} CONTAINERS RUNNING", status.running), cx, r3y + 100, 56.0, p.bright);
                 let stopped_color = if status.stopped.is_empty() { p.mid } else { p.bright };
                 txt_clip(&mut img, fr, &format_stopped(&status.stopped), right_x + 10, r3y + 190, 26.0, right_w - 20, stopped_color);
             }
             Some(WidgetContent::Obsidian(status)) => {
-                draw_gem_icon(&mut img, right_x + 20, r3y + 40, p.mid);
+                draw_obsidian_icon(&mut img, right_x + 20, r3y + 40, p.mid);
                 txt_c(&mut img, fb, &format!("DB SIZE: {}", format_bytes(status.total_size)), cx, r3y + 100, 56.0, p.bright);
                 let detail = format!(
                     "{} DOCS ({} DEL) - {} LIVE ({:.1}X)",
@@ -1132,7 +1170,7 @@ fn render(
                 }
             }
             Some(WidgetContent::Firefly(status)) => {
-                draw_receipt_icon(&mut img, right_x + 20, r3y + 40, p.mid);
+                draw_firefly_icon(&mut img, right_x + 20, r3y + 40, p.mid);
                 let unpaid = format!("{}{:.2} UNPAID", status.currency_symbol, status.bills_unpaid);
                 let unpaid = clip_text(fb, &unpaid, 56.0, right_w - 20);
                 txt_c(&mut img, fb, &unpaid, cx, r3y + 100, 56.0, p.bright);
@@ -1141,7 +1179,7 @@ fn render(
                 txt_c(&mut img, fr, &paid, cx, r3y + 190, 24.0, p.mid);
             }
             Some(WidgetContent::Gramps(status)) => {
-                draw_tree_icon(&mut img, right_x + 20, r3y + 40, p.mid);
+                draw_gramps_icon(&mut img, right_x + 20, r3y + 40, p.mid);
                 let days_line = if status.days_until == 0 { "TODAY!".to_string() } else { format!("{} DAYS", status.days_until) };
                 txt_c(&mut img, fb, &days_line, cx, r3y + 100, 56.0, p.bright);
                 let name_line = clip_text(fr, &format!("{}'S BIRTHDAY", status.name.to_uppercase()), 24.0, right_w - 20);
