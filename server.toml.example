@@ -84,7 +84,11 @@
 #                since LiveSync keeps full revision history and unbounded
 #                growth is easy to miss without a compaction schedule.
 #                Requires couchdb_url and couchdb_databases below.
-#enabled_widgets = ["docker", "obsidian"]
+#   "firefly"  - bills paid/unpaid this calendar month from Firefly III's
+#                summary API. Requires firefly_url and a Personal Access
+#                Token (Options -> Profile -> OAuth -> Personal Access
+#                Tokens in Firefly's UI) below.
+#enabled_widgets = ["docker", "obsidian", "firefly"]
 
 # CouchDB connection for the "obsidian" widget (no trailing slash).
 # Prefer COUCHDB_USER/COUCHDB_PASSWORD in secrets.env instead of the two
@@ -97,3 +101,8 @@
 # `curl -u user:pass https://your-couchdb-url/_all_dbs` to see what exists
 # (ignore "_users" and "_replicator", those are CouchDB's own).
 #couchdb_databases = ["obsidian"]
+
+# Firefly III connection for the "firefly" widget (no trailing slash).
+# Prefer FIREFLY_TOKEN in secrets.env instead of the line below.
+#firefly_url = "https://firefly.example.com"
+#firefly_token = "your-personal-access-token"
