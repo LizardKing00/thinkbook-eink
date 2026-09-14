@@ -41,6 +41,7 @@ struct Config {
     nextcloud_token: Option<String>,
     network_interface: Option<String>,
     enabled_widgets: Option<Vec<String>>,
+    nextcloud_container: Option<String>,
 }
 
 impl Config {
@@ -234,6 +235,33 @@ fn txt_r(img: &mut GrayImage, font: &Font, text: &str, rx: i32, y: i32, size: f3
     draw_text_mut(img, color, rx - tw, y, Scale::uniform(size), font, text);
 }
 
+/// Truncates `text` with a trailing "..." so it never exceeds `max_w`
+/// pixels — a safety net for any label built from variable-length upstream
+/// data (server strings, container names, etc.) that could otherwise
+/// overflow into a neighboring panel. Returns the text unchanged if it
+/// already fits.
+fn clip_text(font: &Font, text: &str, size: f32, max_w: i32) -> String {
+    let scale = Scale::uniform(size);
+    let (w, _) = text_size(scale, font, text);
+    if w <= max_w {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    for ch in text.chars() {
+        let candidate = format!("{}{}...", kept, ch);
+        let (cw, _) = text_size(scale, font, &candidate);
+        if cw > max_w { break; }
+        kept.push(ch);
+    }
+    format!("{}...", kept)
+}
+
+/// Draws left-aligned text, clipped per `clip_text`.
+fn txt_clip(img: &mut GrayImage, font: &Font, text: &str, x: i32, y: i32, size: f32, max_w: i32, color: Luma<u8>) {
+    let clipped = clip_text(font, text, size, max_w);
+    draw_text_mut(img, color, x, y, Scale::uniform(size), font, &clipped);
+}
+
 fn hline(img: &mut GrayImage, x1: i32, x2: i32, y: i32, color: Luma<u8>) {
     draw_line_segment_mut(img, (x1 as f32, y as f32), (x2 as f32, y as f32), color);
 }
@@ -406,7 +434,8 @@ struct ServerInfo {
     php_version: String,
     db_type: String,
     db_version: String,
-    apps_installed: u64,
+    num_users: u64,
+    num_disabled_users: u64,
     num_files: u64,
     shares_user: u64,
     shares_group: u64,
@@ -419,7 +448,7 @@ impl ServerInfo {
     /// as opposed to the all-zero/empty defaults returned when Nextcloud
     /// isn't configured, unreachable, or the JSON shape didn't match.
     fn has_detail(&self) -> bool {
-        !self.php_version.is_empty() || self.apps_installed > 0 || self.num_files > 0
+        !self.php_version.is_empty() || self.num_users > 0 || self.num_files > 0
     }
 }
 
@@ -485,14 +514,19 @@ fn fetch_serverinfo(config: &Config) -> ServerInfo {
     let core_update = core_update_val.as_bool().unwrap_or(false)
         || core_update_val.as_str().map(|s| !s.is_empty()).unwrap_or(false);
 
-    // Best-effort paths per the Nextcloud serverinfo app's documented JSON
-    // shape — if a field lives elsewhere on a given Nextcloud version, it
-    // just falls back to empty/0 and the detail panel shows "NO SERVERINFO
-    // DATA" instead of misleading zeros (see ServerInfo::has_detail).
+    // Paths verified against a live serverinfo response (NC 33.0.5.1) rather
+    // than guessed — the API has no "apps" object anywhere under
+    // nextcloud.system on this version (so an installed-app count isn't
+    // available here at all; we show registered users instead), and
+    // server.database.version can be a long free-text string (e.g. Postgres's
+    // full "PostgreSQL 18.4 on x86_64-pc-linux-musl, compiled by...") rather
+    // than a short number, so it's trimmed to its first two words below.
     let php_version = data["server"]["php"]["version"].as_str().unwrap_or("").to_string();
     let db_type = data["server"]["database"]["type"].as_str().unwrap_or("").to_string();
-    let db_version = data["server"]["database"]["version"].as_str().unwrap_or("").to_string();
-    let apps_installed = data["nextcloud"]["system"]["apps"]["num_installed"].as_u64().unwrap_or(0);
+    let db_version_raw = data["server"]["database"]["version"].as_str().unwrap_or("");
+    let db_version = db_version_raw.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    let num_users = data["nextcloud"]["storage"]["num_users"].as_u64().unwrap_or(0);
+    let num_disabled_users = data["nextcloud"]["storage"]["num_disabled_users"].as_u64().unwrap_or(0);
     let num_files = data["nextcloud"]["storage"]["num_files"].as_u64().unwrap_or(0);
     let shares_user = data["nextcloud"]["shares"]["num_shares_user"].as_u64().unwrap_or(0);
     let shares_group = data["nextcloud"]["shares"]["num_shares_groups"].as_u64().unwrap_or(0);
@@ -506,9 +540,38 @@ fn fetch_serverinfo(config: &Config) -> ServerInfo {
 
     ServerInfo {
         active_5m, active_1h, active_24h, app_updates, core_update,
-        php_version, db_type, db_version, apps_installed, num_files,
+        php_version, db_type, db_version, num_users, num_disabled_users, num_files,
         shares_user, shares_group, shares_link, free_space,
     }
+}
+
+/// Runs `occ update:check` inside the Nextcloud container for accurate core
+/// and app update status. The serverinfo API doesn't expose this at all on
+/// current Nextcloud versions (verified: no "apps"/"update" keys anywhere
+/// in the response), so this is the only reliable source — it's the same
+/// check the admin UI itself is based on. Only used when `nextcloud_container`
+/// is configured; not run every render (see UPDATE_CHECK_INTERVAL_TICKS in
+/// main) since it calls out to the Nextcloud app store for every app.
+fn check_nextcloud_updates(container: &str) -> Option<(u64, bool)> {
+    let output = std::process::Command::new("docker")
+        .args(["exec", "--user", "www-data", container, "php", "occ", "update:check"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut core_update = false;
+    let mut app_updates = 0u64;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("Nextcloud ") && line.contains("is available") {
+            core_update = true;
+        } else if line.starts_with("Update for ") && line.contains("is available") {
+            app_updates += 1;
+        }
+    }
+    Some((app_updates, core_update))
 }
 
 // ---------------------------------------------------------------------------
@@ -641,21 +704,24 @@ fn render(
     let net_max = upload_history.iter().chain(download_history.iter())
         .cloned().fold(0.0_f64, f64::max).max(1.0);
 
+    // Box top is raised to r2y (instead of r2y+38) so the title/current-speed
+    // row sits inside the box like every other panel's header, instead of
+    // floating above it where it could crowd or clip against the box border.
     let bx = MARGIN;
-    txt(&mut img, fb, "// UPLOAD", bx, r2y, 30.0, p.mid);
+    corner_box(&mut img, bx, r2y, graph_w, graph_h + 38, arm, p.dim);
+    txt(&mut img, fb, "// UPLOAD", bx + arm + 6, r2y + 8, 26.0, p.mid);
     let cur_up = upload_history.back().cloned().unwrap_or(0.0);
-    txt_r(&mut img, fb, &format!("TX: {}", format_speed(cur_up)), bx + graph_w, r2y + 2, 28.0, p.bright);
-    corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, p.dim);
+    txt_r(&mut img, fb, &format!("TX: {}", format_speed(cur_up)), bx + graph_w - 10, r2y + 8, 26.0, p.bright);
     draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, upload_history, net_max, &p);
     txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, p.dim);
     txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
     txt_c(&mut img, fr, "TX MB/S (LAST 60 MIN)", bx + graph_w / 2, r2y + 38 + graph_h + 26, 20.0, p.dim);
 
     let bx = MARGIN + graph_w + 60;
-    txt(&mut img, fb, "// DOWNLOAD", bx, r2y, 30.0, p.mid);
+    corner_box(&mut img, bx, r2y, graph_w, graph_h + 38, arm, p.dim);
+    txt(&mut img, fb, "// DOWNLOAD", bx + arm + 6, r2y + 8, 26.0, p.mid);
     let cur_down = download_history.back().cloned().unwrap_or(0.0);
-    txt_r(&mut img, fb, &format!("RX: {}", format_speed(cur_down)), bx + graph_w, r2y + 2, 28.0, p.bright);
-    corner_box(&mut img, bx, r2y + 38, graph_w, graph_h, arm, p.dim);
+    txt_r(&mut img, fb, &format!("RX: {}", format_speed(cur_down)), bx + graph_w - 10, r2y + 8, 26.0, p.bright);
     draw_graph(&mut img, bx + 4, r2y + 42, graph_w - 8, graph_h - 8, download_history, net_max, &p);
     txt(&mut img, fr, "SPEED", bx + 10, r2y + 46, 20.0, p.dim);
     txt_r(&mut img, fr, "TIME ->", bx + graph_w - 10, r2y + 38 + graph_h + 4, 20.0, p.dim);
@@ -673,21 +739,30 @@ fn render(
     let right_w = (W as i32 - MARGIN) - right_x;
     let right_h = 310;
 
-    // Left: Nextcloud detail (static, always on when Nextcloud is configured)
+    // Left: Nextcloud detail (static, always on when Nextcloud is configured).
+    // Every line goes through txt_clip so variable-length upstream data
+    // (long DB version strings, etc.) can never overflow into the widget
+    // panel to its right.
     let bx = MARGIN;
     corner_box(&mut img, bx, r3y, left_w, left_h, arm, p.dim);
     txt(&mut img, fr, "// NEXTCLOUD", bx + 10, r3y + 8, 24.0, p.dim);
+    let line_max_w = left_w - 20;
     if info.has_detail() {
         let lx = bx + 10;
         let mut ly = r3y + 46;
         let db = if info.db_type.is_empty() { "-".to_string() } else { info.db_type.to_uppercase() };
         let db_ver = if info.db_version.is_empty() { "-" } else { &info.db_version };
         let php = if info.php_version.is_empty() { "-" } else { &info.php_version };
-        txt(&mut img, fr, &format!("PHP {} / {} {}", php, db, db_ver), lx, ly, 22.0, p.bright); ly += 34;
-        txt(&mut img, fr, &format!("APPS INSTALLED: {}", info.apps_installed), lx, ly, 22.0, p.bright); ly += 34;
-        txt(&mut img, fr, &format!("FILES: {}", format_count(info.num_files)), lx, ly, 22.0, p.bright); ly += 34;
-        txt(&mut img, fr, &format!("SHARES: {} USR / {} GRP / {} LINK", info.shares_user, info.shares_group, info.shares_link), lx, ly, 22.0, p.bright); ly += 34;
-        txt(&mut img, fr, &format!("FREE SPACE: {}", format_bytes(info.free_space)), lx, ly, 22.0, p.bright);
+        let users_line = if info.num_disabled_users > 0 {
+            format!("USERS: {} REGISTERED ({} DISABLED)", info.num_users, info.num_disabled_users)
+        } else {
+            format!("USERS: {} REGISTERED", info.num_users)
+        };
+        txt_clip(&mut img, fr, &format!("PHP {} / {} {}", php, db, db_ver), lx, ly, 22.0, line_max_w, p.bright); ly += 34;
+        txt_clip(&mut img, fr, &users_line, lx, ly, 22.0, line_max_w, p.bright); ly += 34;
+        txt_clip(&mut img, fr, &format!("FILES: {}", format_count(info.num_files)), lx, ly, 22.0, line_max_w, p.bright); ly += 34;
+        txt_clip(&mut img, fr, &format!("SHARES: {} USR / {} GRP / {} LINK", info.shares_user, info.shares_group, info.shares_link), lx, ly, 22.0, line_max_w, p.bright); ly += 34;
+        txt_clip(&mut img, fr, &format!("FREE SPACE: {}", format_bytes(info.free_space)), lx, ly, 22.0, line_max_w, p.bright);
     } else {
         txt(&mut img, fr, "NO SERVERINFO DATA", bx + 10, r3y + 46, 22.0, p.dim);
     }
@@ -698,17 +773,21 @@ fn render(
     if widget.enabled.is_empty() {
         txt_c(&mut img, fr, "NO WIDGETS ENABLED", right_x + right_w / 2, r3y + right_h / 2, 22.0, p.dim);
     } else {
+        // ASCII markers, not Unicode bullet glyphs — this font/rendering
+        // pipeline has previously dropped non-ASCII symbols entirely
+        // (see the TIME -> arrow fix), rendering as empty boxes.
         let dots: String = widget.enabled.iter().enumerate()
-            .map(|(i, w)| format!("{} {}", if i == widget.active_idx { "\u{25CF}" } else { "\u{25CB}" }, w.label()))
+            .map(|(i, w)| format!("{} {}", if i == widget.active_idx { "*" } else { "o" }, w.label()))
             .collect::<Vec<_>>().join("  ");
+        let dots = clip_text(fr, &dots, 22.0, right_w / 2);
         txt_r(&mut img, fr, &dots, right_x + right_w - 10, r3y + 8, 22.0, p.bright);
 
         let cx = right_x + right_w / 2;
         match &widget.content {
             Some(WidgetContent::Docker(status)) => {
-                txt_c(&mut img, fb, &format!("{} CONTAINERS RUNNING", status.running), cx, r3y + 130, 56.0, p.bright);
+                txt_c(&mut img, fb, &format!("{} CONTAINERS RUNNING", status.running), cx, r3y + 100, 56.0, p.bright);
                 let stopped_color = if status.stopped.is_empty() { p.mid } else { p.bright };
-                txt_c(&mut img, fr, &format_stopped(&status.stopped), cx, r3y + 168, 26.0, stopped_color);
+                txt_clip(&mut img, fr, &format_stopped(&status.stopped), right_x + 10, r3y + 190, 26.0, right_w - 20, stopped_color);
             }
             None => {
                 txt_c(&mut img, fr, &format!("{}: UNAVAILABLE", widget.enabled[widget.active_idx].label()), cx, r3y + right_h / 2, 26.0, p.dim);
@@ -717,14 +796,14 @@ fn render(
 
         let next = widget.enabled[(widget.active_idx + 1) % widget.enabled.len()];
         let caption = format!(
-            "{} ({}/{}) \u{2014} NEXT: {} IN {}M",
+            "{} ({}/{}) - NEXT: {} IN {}M",
             widget.enabled[widget.active_idx].label(),
             widget.active_idx + 1,
             widget.enabled.len(),
             next.label(),
             widget.ticks_remaining,
         );
-        txt_c(&mut img, fr, &caption, cx, r3y + right_h - 16, 18.0, p.dim);
+        txt_c(&mut img, fr, &caption, cx, r3y + right_h - 28, 18.0, p.dim);
     }
 
     // Nextcloud URL summary
@@ -822,6 +901,11 @@ fn main() -> Result<()> {
     let mut last_tick = std::time::Instant::now();
     let mut widget_tick: u32 = 0;
     const WIDGET_ROTATE_TICKS: u32 = 5; // ~5 minutes, one render loop tick ≈ 1 minute
+    let mut update_check_tick: u32 = 0;
+    let mut cached_updates: (u64, bool) = (0, false);
+    // occ update:check calls out to the Nextcloud app store for every
+    // installed app — too expensive to run every render (~once/minute).
+    const UPDATE_CHECK_INTERVAL_TICKS: u32 = 60; // ~once an hour
 
     loop {
         sys.refresh_all();
@@ -838,7 +922,18 @@ fn main() -> Result<()> {
 
         let cpu_temp = get_cpu_temp();
         let (nc_online, nc_version, nc_latency_ms, nc_url) = check_nextcloud(&config);
-        let info = fetch_serverinfo(&config);
+        let mut info = fetch_serverinfo(&config);
+
+        if let Some(container) = config.nextcloud_container.as_deref() {
+            if update_check_tick % UPDATE_CHECK_INTERVAL_TICKS == 0 {
+                if let Some(result) = check_nextcloud_updates(container) {
+                    cached_updates = result;
+                }
+            }
+            info.app_updates = cached_updates.0;
+            info.core_update = cached_updates.1;
+        }
+        update_check_tick = update_check_tick.wrapping_add(1);
 
         let enabled = enabled_widget_kinds(&config);
         let widget = if enabled.is_empty() {

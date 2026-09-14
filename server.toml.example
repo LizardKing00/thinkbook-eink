@@ -46,6 +46,14 @@
 # When set, nextcloud_password is ignored. Requires nextcloud_user to be set.
 #nextcloud_token = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 
+# Name of the Docker container running Nextcloud (e.g. "nextcloud-aio-nextcloud").
+# When set, the "N APP UPDATES PENDING"/"CORE UPDATE PENDING" alerts are
+# driven by `occ update:check` run inside that container (checked roughly
+# once an hour, not every render) instead of the serverinfo API, which does
+# not expose update status on current Nextcloud versions. Requires the
+# Docker CLI and permission to use it, same as the "docker" widget.
+#nextcloud_container = "nextcloud-aio-nextcloud"
+
 # ---------------------------------------------------------------------------
 # Optional service widgets (eink-server only)
 # ---------------------------------------------------------------------------
