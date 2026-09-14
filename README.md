@@ -204,6 +204,11 @@ The driver exposes the following IT8951 refresh modes:
 
 All tools read `/etc/thinkbook-eink/server.toml` at startup. All keys are optional — omitting them keeps the defaults.
 
+Credentials (Nextcloud/CouchDB user/password/token) can also go in
+`/etc/thinkbook-eink/secrets.env` instead — see [Secrets](#secrets) below.
+That's the recommended place for them; server.toml is readable by the
+`plugdev` group, secrets.env is root-only.
+
 ```toml
 # Rotate the display 180 degrees.
 # Useful if the laptop is mounted upside down or the lid is physically inverted.
@@ -274,6 +279,40 @@ All tools read `/etc/thinkbook-eink/server.toml` at startup. All keys are option
 ```
 
 A commented-out example is included in `server.toml.example`.
+
+### Secrets
+
+Credentials are better kept out of `server.toml` (world-readable by the
+`plugdev` group) and instead placed in `/etc/thinkbook-eink/secrets.env`
+(root-only), which the systemd unit loads via `EnvironmentFile=` before
+starting `eink-server`:
+
+```bash
+sudo install -m 600 -o root -g root secrets.env.example /etc/thinkbook-eink/secrets.env
+sudo nano /etc/thinkbook-eink/secrets.env   # fill in real values
+sudo systemctl restart eink-server
+```
+
+Supported variables — see `secrets.env.example` for the full annotated
+list:
+
+```
+NEXTCLOUD_USER=admin
+NEXTCLOUD_PASSWORD=...
+NEXTCLOUD_TOKEN=...
+COUCHDB_USER=admin
+COUCHDB_PASSWORD=...
+```
+
+Anything set in `server.toml`'s `nextcloud_user`/`nextcloud_password`/
+`nextcloud_token`/`couchdb_user`/`couchdb_password` still works and takes
+priority if both are set — this is only additive, so an existing setup
+with credentials already in `server.toml` isn't broken by upgrading.
+
+The `secrets.env` file is entirely optional: if it doesn't exist, systemd
+just starts the service without it (note the leading `-` on
+`EnvironmentFile=-...` in `systemd/eink-server.service`), and everything
+falls back to whatever's in `server.toml`.
 
 ### Applying config changes
 
