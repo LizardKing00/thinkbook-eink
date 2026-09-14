@@ -207,6 +207,14 @@ All tools read `/etc/thinkbook-eink/server.toml` at startup. All keys are option
 # "light" = light background, dark text
 #theme = "light"
 
+# Network interface to measure for the upload/download graphs — eink-server only
+# Default: auto-exclude loopback and virtual interfaces (docker*, veth*, br-*,
+# virbr*, tun*, tap*) and sum whatever real interfaces remain. Set this to pin
+# exactly one physical uplink (useful if you run Docker, since bridge/veth
+# traffic is symmetric and can otherwise still skew the graphs) or to override
+# auto-detection. Run `ip -o link show` to list interface names.
+#network_interface = "wlp0s20f3"
+
 # Nextcloud URL (no trailing slash) — eink-server only
 #nextcloud_url = "https://localhost"
 
