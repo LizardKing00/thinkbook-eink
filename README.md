@@ -264,7 +264,10 @@ That's the recommended place for them; server.toml is readable by the
 #                Self-hosted LiveSync vault database(s), queried directly
 #                from CouchDB. Warns once the combined size passes 2GB.
 #                Requires couchdb_url and couchdb_databases below.
-#enabled_widgets = ["docker", "obsidian"]
+#   "firefly"  - bills paid/unpaid this calendar month from Firefly III's
+#                summary API. Requires firefly_url and a Personal Access
+#                Token below.
+#enabled_widgets = ["docker", "obsidian", "firefly"]
 
 # CouchDB connection for the "obsidian" widget — eink-server only (no
 # trailing slash on the URL).
@@ -276,6 +279,12 @@ That's the recommended place for them; server.toml is readable by the
 # `curl -u user:pass https://your-couchdb-url/_all_dbs` to see what exists
 # (ignore "_users" and "_replicator", those are CouchDB's own).
 #couchdb_databases = ["obsidian"]
+
+# Firefly III connection for the "firefly" widget — eink-server only (no
+# trailing slash on the URL). Generate a token in Firefly:
+# Options -> Profile -> OAuth -> Personal Access Tokens.
+#firefly_url = "https://firefly.example.com"
+#firefly_token = "your-personal-access-token"
 ```
 
 A commented-out example is included in `server.toml.example`.
@@ -302,6 +311,7 @@ NEXTCLOUD_PASSWORD=...
 NEXTCLOUD_TOKEN=...
 COUCHDB_USER=admin
 COUCHDB_PASSWORD=...
+FIREFLY_TOKEN=...
 ```
 
 Anything set in `server.toml`'s `nextcloud_user`/`nextcloud_password`/
@@ -333,6 +343,13 @@ The startup line will show the active theme and flip state, for example:
 ```
 Config: theme=light, flip=true
 ```
+
+If `server.toml` has a syntax error (including a duplicate key — TOML
+doesn't allow setting the same key twice, e.g. from pasting a config
+snippet in more than once) it logs a `WARNING: failed to parse ...` line
+and falls back to all defaults, which means every setting is ignored, not
+just the broken one. Check `journalctl -u eink-server -n 20` if the
+dashboard suddenly looks like it reset to defaults after an edit.
 
 ---
 

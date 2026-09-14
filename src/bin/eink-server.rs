@@ -46,15 +46,30 @@ struct Config {
     couchdb_user: Option<String>,
     couchdb_password: Option<String>,
     couchdb_databases: Option<Vec<String>>,
+    firefly_url: Option<String>,
+    firefly_token: Option<String>,
 }
 
 impl Config {
     fn load() -> Self {
         let mut config = if Path::new(CONFIG_PATH).exists() {
-            fs::read_to_string(CONFIG_PATH)
-                .ok()
-                .and_then(|contents| toml::from_str(&contents).ok())
-                .unwrap_or_default()
+            match fs::read_to_string(CONFIG_PATH) {
+                Ok(contents) => match toml::from_str(&contents) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        eprintln!(
+                            "WARNING: failed to parse {} ({}) — falling back to defaults. \
+                             The whole config is now ignored, including flip/theme/credentials.",
+                            CONFIG_PATH, e
+                        );
+                        Config::default()
+                    }
+                },
+                Err(e) => {
+                    eprintln!("WARNING: failed to read {} ({}) — falling back to defaults.", CONFIG_PATH, e);
+                    Config::default()
+                }
+            }
         } else {
             Config::default()
         };
@@ -77,6 +92,7 @@ impl Config {
         fill(&mut self.nextcloud_token, "NEXTCLOUD_TOKEN");
         fill(&mut self.couchdb_user, "COUCHDB_USER");
         fill(&mut self.couchdb_password, "COUCHDB_PASSWORD");
+        fill(&mut self.firefly_token, "FIREFLY_TOKEN");
     }
 
     fn is_flipped(&self) -> bool {
@@ -99,6 +115,7 @@ impl Config {
 enum WidgetKind {
     Docker,
     Obsidian,
+    Firefly,
 }
 
 impl WidgetKind {
@@ -106,6 +123,7 @@ impl WidgetKind {
         match name.to_lowercase().as_str() {
             "docker" => Some(WidgetKind::Docker),
             "obsidian" => Some(WidgetKind::Obsidian),
+            "firefly" => Some(WidgetKind::Firefly),
             _ => None,
         }
     }
@@ -114,6 +132,7 @@ impl WidgetKind {
         match self {
             WidgetKind::Docker => "DOCKER",
             WidgetKind::Obsidian => "OBSIDIAN",
+            WidgetKind::Firefly => "FIREFLY",
         }
     }
 }
@@ -236,9 +255,43 @@ impl ObsidianStatus {
     }
 }
 
+struct FireflyStatus {
+    bills_paid: f64,
+    bills_unpaid: f64,
+    currency_symbol: String,
+}
+
+/// Queries Firefly III's summary/basic endpoint for the current calendar
+/// month (verified live: it 400s without start/end params). The response
+/// is keyed by currency (e.g. "bills-paid-in-EUR", since Firefly supports
+/// multiple currencies), so this scans for the first matching key rather
+/// than assuming a currency — and monetary_value is a numeric *string* in
+/// the real response, not a JSON number.
+fn get_firefly_status(config: &Config) -> Option<FireflyStatus> {
+    let base = config.firefly_url.as_deref()?.trim_end_matches('/').to_string();
+    let token = config.firefly_token.as_deref()?;
+    let client = http_client()?;
+    let now = Local::now();
+    let start = now.format("%Y-%m-01").to_string();
+    let end = now.format("%Y-%m-%d").to_string();
+    let url = format!("{}/api/v1/summary/basic?start={}&end={}", base, start, end);
+    let json: serde_json::Value = client.get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/json")
+        .send().ok()?.json().ok()?;
+    let obj = json.as_object()?;
+    let paid = obj.iter().find(|(k, _)| k.starts_with("bills-paid-in-"))?.1;
+    let unpaid = obj.iter().find(|(k, _)| k.starts_with("bills-unpaid-in-"))?.1;
+    let bills_paid = paid["monetary_value"].as_str()?.parse::<f64>().ok()?;
+    let bills_unpaid = unpaid["monetary_value"].as_str()?.parse::<f64>().ok()?;
+    let currency_symbol = paid["currency_symbol"].as_str().unwrap_or("").to_string();
+    Some(FireflyStatus { bills_paid, bills_unpaid, currency_symbol })
+}
+
 enum WidgetContent {
     Docker(DockerStatus),
     Obsidian(ObsidianStatus),
+    Firefly(FireflyStatus),
 }
 
 /// State for the lower-right rotating widget panel: which widgets are
@@ -404,6 +457,27 @@ fn draw_warn_triangle(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
     draw_line_segment_mut(img, bottom_left, apex, color);
     draw_line_segment_mut(img, (xf + w / 2.0, yf + h * 0.32), (xf + w / 2.0, yf + h * 0.62), color);
     draw_filled_rect_mut(img, Rect::at((xf + w / 2.0 - 1.0) as i32, (yf + h * 0.74) as i32).of_size(2, 2), color);
+}
+
+/// A small receipt/bill glyph (40x58px: torn-edge rectangle with a few
+/// line-item marks inside), wireframe line art matching the dashboard's
+/// existing icon style — original geometry, not any app's logo.
+fn draw_receipt_icon(img: &mut GrayImage, x: i32, y: i32, color: Luma<u8>) {
+    let (xf, yf) = (x as f32, y as f32);
+    draw_line_segment_mut(img, (xf, yf), (xf + 40.0, yf), color);
+    draw_line_segment_mut(img, (xf, yf), (xf, yf + 48.0), color);
+    draw_line_segment_mut(img, (xf + 40.0, yf), (xf + 40.0, yf + 48.0), color);
+    let zigzag = [
+        (xf, yf + 48.0), (xf + 10.0, yf + 58.0), (xf + 20.0, yf + 48.0),
+        (xf + 30.0, yf + 58.0), (xf + 40.0, yf + 48.0),
+    ];
+    for pair in zigzag.windows(2) {
+        draw_line_segment_mut(img, pair[0], pair[1], color);
+    }
+    for i in 0..3 {
+        let ly = yf + 14.0 + i as f32 * 10.0;
+        draw_line_segment_mut(img, (xf + 8.0, ly), (xf + 32.0, ly), color);
+    }
 }
 
 fn dashed_hline(img: &mut GrayImage, x1: i32, x2: i32, y: i32, color: Luma<u8>) {
@@ -943,6 +1017,15 @@ fn render(
                     txt_c(&mut img, fr, "COMPACT RECOMMENDED", cx, r3y + 232, 24.0, p.bright);
                 }
             }
+            Some(WidgetContent::Firefly(status)) => {
+                draw_receipt_icon(&mut img, right_x + 20, r3y + 40, p.mid);
+                let unpaid = format!("{}{:.2} UNPAID", status.currency_symbol, status.bills_unpaid);
+                let unpaid = clip_text(fb, &unpaid, 56.0, right_w - 20);
+                txt_c(&mut img, fb, &unpaid, cx, r3y + 100, 56.0, p.bright);
+                let paid = format!("{}{:.2} PAID THIS MONTH", status.currency_symbol, status.bills_paid);
+                let paid = clip_text(fr, &paid, 24.0, right_w - 20);
+                txt_c(&mut img, fr, &paid, cx, r3y + 190, 24.0, p.mid);
+            }
             None => {
                 txt_c(&mut img, fr, &format!("{}: UNAVAILABLE", widget.enabled[widget.active_idx].label()), cx, r3y + right_h / 2, 26.0, p.dim);
             }
@@ -1098,6 +1181,7 @@ fn main() -> Result<()> {
             let content = match enabled[active_idx] {
                 WidgetKind::Docker => get_docker_status().map(WidgetContent::Docker),
                 WidgetKind::Obsidian => get_obsidian_status(&config).map(WidgetContent::Obsidian),
+                WidgetKind::Firefly => get_firefly_status(&config).map(WidgetContent::Firefly),
             };
             WidgetPanelState { enabled, active_idx, content, ticks_remaining }
         };
